@@ -1,0 +1,28 @@
+{
+  "name": "MaxPlay - Movies, TV & Anime Streaming",
+  "short_name": "MaxPlay",
+  "description": "Watch unlimited movies, TV shows, and anime in HD with fast multi-audio streaming, offline downloads, and cloud sync.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0A0A0A",
+  "theme_color": "#8B5CF6",
+  "orientation": "portrait-primary",
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  },
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["entertainment", "video", "movies", "anime"]
+}

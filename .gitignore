@@ -1,0 +1,13 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+firebase-applet-config.json
+firebase_applet_config.xml
+public/assets/aistudio/
+android-kotlin/app/src/main/assets/webapp/*
+!android-kotlin/app/src/main/assets/webapp/.gitkeep

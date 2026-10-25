@@ -1,0 +1,69 @@
+name: Build MaxPlay Native Kotlin APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Web Dependencies & Build MaxPlay Frontend Bundle
+        run: |
+          npm install
+          npx vite build
+          rm -rf android-kotlin/app/src/main/assets/webapp/*
+          mkdir -p android-kotlin/app/src/main/assets/webapp
+          cp -r dist/* android-kotlin/app/src/main/assets/webapp/
+
+      - name: Setup JDK 17 for Kotlin Android Build
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK & Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Generate Release Keystore & Compile Signed MaxPlay + MaxPlay Admin Release APKs
+        working-directory: ./android-kotlin
+        run: |
+          rm -f app/release.keystore
+          rm -rf dist-apks
+          mkdir -p dist-apks
+          keytool -genkeypair -v -keystore app/release.keystore -alias maxplay -keyalg RSA -keysize 2048 -validity 10000 -storepass maxplay123 -keypass maxplay123 -dname "CN=MaxPlay, OU=App, O=MaxPlay, L=Mumbai, S=MH, C=IN"
+          gradle assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk dist-apks/MaxPlay.apk
+          gradle assembleRelease -PadminApp=true --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk dist-apks/MaxPlay-Admin.apk
+          ls -lh dist-apks/
+
+      - name: Upload Ready-to-Install MaxPlay APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MaxPlay-Android-Kotlin-APK
+          path: android-kotlin/dist-apks/MaxPlay.apk
+          if-no-files-found: error
+
+      - name: Upload Ready-to-Install MaxPlay Admin APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MaxPlay-Admin-Kotlin-APK
+          path: android-kotlin/dist-apks/MaxPlay-Admin.apk
+          if-no-files-found: error
