@@ -688,9 +688,12 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
   const [isQualityModalOpen, setIsQualityModalOpen] = useState(false);
   const [isSeasonModalOpen, setIsSeasonModalOpen] = useState(false);
   const [discoveredAudioTracks, setDiscoveredAudioTracks] = useState<string[]>([]);
+  const [s1DiscoveredAudioTracks, setS1DiscoveredAudioTracks] = useState<string[]>([]);
+  const [s2DiscoveredAudioTracks, setS2DiscoveredAudioTracks] = useState<string[]>([]);
   const [discoveredQualities, setDiscoveredQualities] = useState<string[]>([]);
   const [s1DiscoveredQualities, setS1DiscoveredQualities] = useState<string[]>([]);
   const [s2DiscoveredQualities, setS2DiscoveredQualities] = useState<string[]>([]);
+  const lastUserSelectedLangRef = useRef<string>('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [catalogItems, setCatalogItems] = useState<ContentItem[]>([]);
 
@@ -1166,15 +1169,18 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
 
         if (currentEp.videoSources && typeof currentEp.videoSources === 'object' && Object.keys(currentEp.videoSources).length > 0) {
           playerVideoSources = currentEp.videoSources;
-          const targetLang = (activeLanguage && currentEp.videoSources[activeLanguage]) ? activeLanguage : Object.keys(currentEp.videoSources)[0];
+          const targetLang =
+            (activeLanguage &&
+              Object.keys(currentEp.videoSources).find((k) => k.toLowerCase().trim() === activeLanguage.toLowerCase().trim())) ||
+            Object.keys(currentEp.videoSources)[0];
           const langEntry = targetLang ? currentEp.videoSources[targetLang] : undefined;
           if (langEntry && typeof langEntry === 'object') {
-            playerQualityLinks = { ...langEntry, ...epQualityObj };
+            playerQualityLinks = { ...epQualityObj, ...langEntry };
           } else {
             playerQualityLinks = { ...epQualityObj };
           }
           const smartInit = SmartStreamService.selectSourceUrlForQuality(
-            typeof langEntry === 'string' && Object.keys(epQualityObj).length === 0
+            typeof langEntry === 'string' && langEntry.trim().length > 0
               ? langEntry
               : (currentEp.videoUrl || content.videoUrl || ''),
             playerQualityLinks,
@@ -1183,15 +1189,18 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
           playerVideoUrl = smartInit.chosenUrl;
         } else if (content.videoSources && typeof content.videoSources === 'object' && Object.keys(content.videoSources).length > 0) {
           playerVideoSources = content.videoSources;
-          const targetLang = (activeLanguage && content.videoSources[activeLanguage]) ? activeLanguage : Object.keys(content.videoSources)[0];
+          const targetLang =
+            (activeLanguage &&
+              Object.keys(content.videoSources).find((k) => k.toLowerCase().trim() === activeLanguage.toLowerCase().trim())) ||
+            Object.keys(content.videoSources)[0];
           const langEntry = targetLang ? content.videoSources[targetLang] : undefined;
           if (langEntry && typeof langEntry === 'object') {
-            playerQualityLinks = { ...langEntry, ...epQualityObj };
+            playerQualityLinks = { ...epQualityObj, ...langEntry };
           } else {
             playerQualityLinks = { ...epQualityObj };
           }
           const smartInit = SmartStreamService.selectSourceUrlForQuality(
-            typeof langEntry === 'string' && Object.keys(epQualityObj).length === 0
+            typeof langEntry === 'string' && langEntry.trim().length > 0
               ? langEntry
               : (currentEp.videoUrl || content.videoUrl || ''),
             playerQualityLinks,
@@ -1219,15 +1228,18 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
 
         if (typeof extraPartObj === 'object' && extraPartObj.videoSources && Object.keys(extraPartObj.videoSources).length > 0) {
           playerVideoSources = extraPartObj.videoSources;
-          const targetLang = (activeLanguage && extraPartObj.videoSources[activeLanguage]) ? activeLanguage : Object.keys(extraPartObj.videoSources)[0];
+          const targetLang =
+            (activeLanguage &&
+              Object.keys(extraPartObj.videoSources).find((k) => k.toLowerCase().trim() === activeLanguage.toLowerCase().trim())) ||
+            Object.keys(extraPartObj.videoSources)[0];
           const langEntry = targetLang ? extraPartObj.videoSources[targetLang] : undefined;
           if (langEntry && typeof langEntry === 'object') {
-            playerQualityLinks = { ...langEntry, ...partQualityObj };
+            playerQualityLinks = { ...partQualityObj, ...langEntry };
           } else {
             playerQualityLinks = { ...partQualityObj };
           }
           const smartPart = SmartStreamService.selectSourceUrlForQuality(
-            typeof langEntry === 'string' && Object.keys(partQualityObj).length === 0
+            typeof langEntry === 'string' && langEntry.trim().length > 0
               ? langEntry
               : (extraPartObj.videoUrl || ''),
             playerQualityLinks,
@@ -1323,15 +1335,18 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
 
       if (typeof activeMoviePart === 'object' && activeMoviePart.videoSources && Object.keys(activeMoviePart.videoSources).length > 0) {
         playerVideoSources = activeMoviePart.videoSources;
-        const targetLang = (activeLanguage && activeMoviePart.videoSources[activeLanguage]) ? activeLanguage : Object.keys(activeMoviePart.videoSources)[0];
+        const targetLang =
+          (activeLanguage &&
+            Object.keys(activeMoviePart.videoSources).find((k) => k.toLowerCase().trim() === activeLanguage.toLowerCase().trim())) ||
+          Object.keys(activeMoviePart.videoSources)[0];
         const langEntry = targetLang ? activeMoviePart.videoSources[targetLang] : undefined;
         if (langEntry && typeof langEntry === 'object') {
-          playerQualityLinks = { ...langEntry, ...movieQualityObj };
+          playerQualityLinks = { ...movieQualityObj, ...langEntry };
         } else {
           playerQualityLinks = { ...movieQualityObj };
         }
         const smartMovie = SmartStreamService.selectSourceUrlForQuality(
-          typeof langEntry === 'string' && Object.keys(movieQualityObj).length === 0
+          typeof langEntry === 'string' && langEntry.trim().length > 0
             ? langEntry
             : (activeMoviePart.videoUrl || content.videoUrl || ''),
           playerQualityLinks,
@@ -1353,15 +1368,18 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
         playerQualityLinks = {};
       } else if (content.videoSources && Object.keys(content.videoSources).length > 0) {
         playerVideoSources = content.videoSources;
-        const targetLang = (activeLanguage && content.videoSources[activeLanguage]) ? activeLanguage : Object.keys(content.videoSources)[0];
+        const targetLang =
+          (activeLanguage &&
+            Object.keys(content.videoSources).find((k) => k.toLowerCase().trim() === activeLanguage.toLowerCase().trim())) ||
+          Object.keys(content.videoSources)[0];
         const langEntry = targetLang ? content.videoSources[targetLang] : undefined;
         if (langEntry && typeof langEntry === 'object') {
-          playerQualityLinks = { ...langEntry, ...movieQualityObj };
+          playerQualityLinks = { ...movieQualityObj, ...langEntry };
         } else {
           playerQualityLinks = { ...movieQualityObj };
         }
         const smartMovie = SmartStreamService.selectSourceUrlForQuality(
-          typeof langEntry === 'string' && Object.keys(movieQualityObj).length === 0
+          typeof langEntry === 'string' && langEntry.trim().length > 0
             ? langEntry
             : (content.videoUrl || ''),
           playerQualityLinks,
@@ -1384,77 +1402,166 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
     }
   }
 
+  // Helper to extract only non-empty quality links from dictionaries and verified downloadQualities arrays
+  const extractNonEmptyQualityMap = (
+    ...sources: Array<Record<string, any> | any[] | undefined | null>
+  ): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const src of sources) {
+      if (!src) continue;
+      if (Array.isArray(src)) {
+        for (const item of src) {
+          const qId = String(item?.id || item?.quality || '').trim();
+          const qUrl = SmartStreamService.sanitizeStreamUrl(item?.url || '');
+          if (qId && qUrl && !out[qId] && qId.toLowerCase() !== 'auto') {
+            out[qId] = qUrl;
+          }
+        }
+      } else if (typeof src === 'object') {
+        for (const [k, v] of Object.entries(src)) {
+          const cleanK = k.trim();
+          const cleanV = typeof v === 'string' ? SmartStreamService.sanitizeStreamUrl(v) : '';
+          if (cleanK && cleanV && !out[cleanK] && cleanK.toLowerCase() !== 'auto') {
+            out[cleanK] = cleanV;
+          }
+        }
+      }
+      if (Object.keys(out).length > 0) break;
+    }
+    return out;
+  };
+
+  const firstNonEmptyUrl = (dict: Record<string, string>, ...fallbacks: Array<string | undefined | null>): string => {
+    for (const fb of fallbacks) {
+      const cleanFb = SmartStreamService.sanitizeStreamUrl(fb || '');
+      if (cleanFb) return cleanFb;
+    }
+    for (const qKey of ['1080p', '720p', '480p', '360p', ...Object.keys(dict)]) {
+      const val = dict[qKey];
+      if (typeof val === 'string' && val.trim().length > 0) {
+        return SmartStreamService.sanitizeStreamUrl(val);
+      }
+    }
+    return '';
+  };
+
   // 3. DUAL-SERVER RESOLUTION (Server 1: Primary Voe.sx / HLS | Server 2: Secondary Filemoon / Byse)
-  let primaryServerUrl = SmartStreamService.sanitizeStreamUrl(playerVideoUrl || content.videoUrl || '');
+  let primaryServerUrl = SmartStreamService.sanitizeStreamUrl(
+    playerVideoUrl || firstNonEmptyUrl(playerQualityLinks, content.videoUrl)
+  );
   let secondaryServerUrl = '';
   let secondaryServerQualityLinks: Record<string, string> = {};
+  let secondaryVideoSources: Record<string, any> = {};
 
   if (isSeries && !isMovie && currentEpisode) {
     const epExtraParts = Array.isArray(currentEpisode.videoLinks) ? currentEpisode.videoLinks : [];
+    const epPart0 =
+      epExtraParts.length > 0 && typeof epExtraParts[0] === 'object' ? epExtraParts[0] : null;
+
     if (selectedPartIndex > 0 && epExtraParts[selectedPartIndex - 1] && typeof epExtraParts[selectedPartIndex - 1] === 'object') {
       const extraPartObj = epExtraParts[selectedPartIndex - 1];
-      secondaryServerUrl = SmartStreamService.sanitizeStreamUrl(
-        extraPartObj.secondaryServerUrl || extraPartObj.secondaryVideoUrl || extraPartObj.secondaryUrl || ''
+      secondaryServerQualityLinks = extractNonEmptyQualityMap(
+        extraPartObj.secondaryServerQualityLinks,
+        extraPartObj.secondaryQualityLinks,
+        extraPartObj.secondaryDownloadQualities
       );
-      secondaryServerQualityLinks =
-        extraPartObj.secondaryServerQualityLinks ||
-        extraPartObj.secondaryQualityLinks ||
-        {};
+      secondaryServerUrl = firstNonEmptyUrl(
+        secondaryServerQualityLinks,
+        extraPartObj.secondaryServerUrl,
+        extraPartObj.secondaryVideoUrl,
+        extraPartObj.secondaryUrl
+      );
+      if (extraPartObj.secondaryVideoSources && typeof extraPartObj.secondaryVideoSources === 'object') {
+        secondaryVideoSources = extraPartObj.secondaryVideoSources;
+      }
     } else {
-      const rawSecLinks =
-        (currentEpisode.secondaryServerQualityLinks && Object.keys(currentEpisode.secondaryServerQualityLinks).length > 0)
-          ? currentEpisode.secondaryServerQualityLinks
-          : (currentEpisode.secondaryQualityLinks && Object.keys(currentEpisode.secondaryQualityLinks).length > 0)
-          ? currentEpisode.secondaryQualityLinks
-          : ((content as any).secondaryServerQualityLinks && Object.keys((content as any).secondaryServerQualityLinks).length > 0)
-          ? (content as any).secondaryServerQualityLinks
-          : (content.secondaryQualityLinks || {});
-      secondaryServerQualityLinks = rawSecLinks;
-      secondaryServerUrl = SmartStreamService.sanitizeStreamUrl(
-        (currentEpisode as any).secondaryServerUrl ||
-        currentEpisode.secondaryVideoUrl ||
-        (currentEpisode as any).secondaryUrl ||
-        (content as any).secondaryServerUrl ||
-        content.secondaryVideoUrl ||
-        (content as any).secondaryUrl ||
-        Object.values(rawSecLinks)[0] ||
-        ''
+      secondaryServerQualityLinks = extractNonEmptyQualityMap(
+        (currentEpisode as any).secondaryServerQualityLinks,
+        currentEpisode.secondaryQualityLinks,
+        (currentEpisode as any).secondaryDownloadQualities,
+        epPart0?.secondaryServerQualityLinks,
+        epPart0?.secondaryQualityLinks,
+        epPart0?.secondaryDownloadQualities,
+        (content as any).secondaryServerQualityLinks,
+        content.secondaryQualityLinks,
+        (content as any).secondaryDownloadQualities
       );
+      secondaryServerUrl = firstNonEmptyUrl(
+        secondaryServerQualityLinks,
+        (currentEpisode as any).secondaryServerUrl,
+        currentEpisode.secondaryVideoUrl,
+        (currentEpisode as any).secondaryUrl,
+        epPart0?.secondaryServerUrl,
+        epPart0?.secondaryVideoUrl,
+        epPart0?.secondaryUrl,
+        (content as any).secondaryServerUrl,
+        content.secondaryVideoUrl,
+        (content as any).secondaryUrl
+      );
+      if ((currentEpisode as any).secondaryVideoSources && typeof (currentEpisode as any).secondaryVideoSources === 'object') {
+        secondaryVideoSources = (currentEpisode as any).secondaryVideoSources;
+      }
     }
   } else {
+    const contentPart0 =
+      Array.isArray(content.videoLinks) && content.videoLinks.length > 0 && typeof content.videoLinks[0] === 'object'
+        ? content.videoLinks[0]
+        : null;
+    const moviePart0 =
+      Array.isArray((content as any).movieParts) && (content as any).movieParts.length > 0 && typeof (content as any).movieParts[0] === 'object'
+        ? (content as any).movieParts[0]
+        : null;
+
     if (activeMoviePart && typeof activeMoviePart === 'object') {
-      const rawSecLinks =
-        (activeMoviePart.secondaryServerQualityLinks && Object.keys(activeMoviePart.secondaryServerQualityLinks).length > 0)
-          ? activeMoviePart.secondaryServerQualityLinks
-          : (activeMoviePart.secondaryQualityLinks && Object.keys(activeMoviePart.secondaryQualityLinks).length > 0)
-          ? activeMoviePart.secondaryQualityLinks
-          : ((content as any).secondaryServerQualityLinks && Object.keys((content as any).secondaryServerQualityLinks).length > 0)
-          ? (content as any).secondaryServerQualityLinks
-          : (content.secondaryQualityLinks || {});
-      secondaryServerQualityLinks = rawSecLinks;
-      secondaryServerUrl = SmartStreamService.sanitizeStreamUrl(
-        activeMoviePart.secondaryServerUrl ||
-        activeMoviePart.secondaryVideoUrl ||
-        activeMoviePart.secondaryUrl ||
-        (content as any).secondaryServerUrl ||
-        content.secondaryVideoUrl ||
-        (content as any).secondaryUrl ||
-        Object.values(rawSecLinks)[0] ||
-        ''
+      secondaryServerQualityLinks = extractNonEmptyQualityMap(
+        activeMoviePart.secondaryServerQualityLinks,
+        activeMoviePart.secondaryQualityLinks,
+        activeMoviePart.secondaryDownloadQualities,
+        contentPart0?.secondaryServerQualityLinks,
+        contentPart0?.secondaryQualityLinks,
+        contentPart0?.secondaryDownloadQualities,
+        moviePart0?.secondaryServerQualityLinks,
+        moviePart0?.secondaryQualityLinks,
+        moviePart0?.secondaryDownloadQualities,
+        (content as any).secondaryServerQualityLinks,
+        content.secondaryQualityLinks,
+        (content as any).secondaryDownloadQualities
       );
+      secondaryServerUrl = firstNonEmptyUrl(
+        secondaryServerQualityLinks,
+        activeMoviePart.secondaryServerUrl,
+        activeMoviePart.secondaryVideoUrl,
+        activeMoviePart.secondaryUrl,
+        contentPart0?.secondaryServerUrl,
+        contentPart0?.secondaryVideoUrl,
+        contentPart0?.secondaryUrl,
+        moviePart0?.secondaryServerUrl,
+        moviePart0?.secondaryVideoUrl,
+        moviePart0?.secondaryUrl,
+        (content as any).secondaryServerUrl,
+        content.secondaryVideoUrl,
+        (content as any).secondaryUrl
+      );
+      if (activeMoviePart.secondaryVideoSources && typeof activeMoviePart.secondaryVideoSources === 'object') {
+        secondaryVideoSources = activeMoviePart.secondaryVideoSources;
+      } else if ((content as any).secondaryVideoSources && typeof (content as any).secondaryVideoSources === 'object') {
+        secondaryVideoSources = (content as any).secondaryVideoSources;
+      }
     } else {
-      const rawSecLinks =
-        ((content as any).secondaryServerQualityLinks && Object.keys((content as any).secondaryServerQualityLinks).length > 0)
-          ? (content as any).secondaryServerQualityLinks
-          : (content.secondaryQualityLinks || {});
-      secondaryServerQualityLinks = rawSecLinks;
-      secondaryServerUrl = SmartStreamService.sanitizeStreamUrl(
-        (content as any).secondaryServerUrl ||
-        content.secondaryVideoUrl ||
-        (content as any).secondaryUrl ||
-        Object.values(rawSecLinks)[0] ||
-        ''
+      secondaryServerQualityLinks = extractNonEmptyQualityMap(
+        (content as any).secondaryServerQualityLinks,
+        content.secondaryQualityLinks,
+        (content as any).secondaryDownloadQualities
       );
+      secondaryServerUrl = firstNonEmptyUrl(
+        secondaryServerQualityLinks,
+        (content as any).secondaryServerUrl,
+        content.secondaryVideoUrl,
+        (content as any).secondaryUrl
+      );
+      if ((content as any).secondaryVideoSources && typeof (content as any).secondaryVideoSources === 'object') {
+        secondaryVideoSources = (content as any).secondaryVideoSources;
+      }
     }
   }
 
@@ -1468,7 +1575,7 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
         );
         playerQualityLinks = smartS2.cleanQualityLinks;
         playerVideoUrl = smartS2.chosenUrl || secondaryServerUrl;
-        playerVideoSources = {};
+        playerVideoSources = secondaryVideoSources || {};
       }
     } else if (selectedServer === 'server1') {
       if (playerQualityLinks && typeof playerQualityLinks === 'object' && Object.keys(playerQualityLinks).length > 0) {
@@ -1495,11 +1602,21 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
     }
   }
 
-  // Reset discoveredAudioTracks and discoveredQualities when switching episode or server
+  // Reset per-episode discovered tracks/qualities only when switching content or episode (never wipe cross-server cache on server toggle!)
   useEffect(() => {
     setDiscoveredAudioTracks([]);
+    setS1DiscoveredAudioTracks([]);
+    setS2DiscoveredAudioTracks([]);
     setDiscoveredQualities([]);
-  }, [content?.id, selectedSeasonIndex, selectedEpisodeIndex, selectedServer]);
+    setS1DiscoveredQualities([]);
+    setS2DiscoveredQualities([]);
+  }, [content?.id, selectedSeasonIndex, selectedEpisodeIndex]);
+
+  // Sync active server's discovered tracks/qualities when toggling Server 1 <-> Server 2
+  useEffect(() => {
+    setDiscoveredAudioTracks(selectedServer === 'server2' ? s2DiscoveredAudioTracks : s1DiscoveredAudioTracks);
+    setDiscoveredQualities(selectedServer === 'server2' ? s2DiscoveredQualities : s1DiscoveredQualities);
+  }, [selectedServer, s1DiscoveredAudioTracks, s2DiscoveredAudioTracks, s1DiscoveredQualities, s2DiscoveredQualities]);
 
   // Pre-warm both Server 1 and Server 2 streams in the background for instant 0ms playback & server switching
   useEffect(() => {
@@ -1516,83 +1633,246 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
     return /^(\d{3,4}p|4k|2k|8k|hd|fhd|uhd|sd|auto)$/i.test(val.trim());
   };
 
-  // Derive available languages dynamically for the current part & active server (Strictly filters out any quality labels!)
-  const availableLanguages = useMemo(() => {
+  // Track Server 1 specific languages, Server 2 specific languages, and Unified Languages across BOTH servers
+  const { s1SpecificLanguages, s2SpecificLanguages, availableLanguages } = useMemo(() => {
+    const s1List: string[] = [];
+    const s2List: string[] = [];
     const merged: string[] = [];
-    const addUnique = (lang?: string) => {
-      if (!lang || typeof lang !== 'string') return;
-      const clean = lang.trim();
-      if (
-        !clean ||
-        clean.toLowerCase() === 'default' ||
-        clean.toLowerCase() === 'default audio' ||
-        isQualityKeyString(clean)
-      ) {
-        return;
-      }
-      const normalized = ClientHlsDownloader.normalizeLanguageLabel(clean, clean) || clean;
-      if (!normalized || isQualityKeyString(normalized)) return;
-      if (!merged.some((m) => m.toLowerCase() === normalized.toLowerCase())) {
-        merged.push(normalized);
+
+    const addLangTo = (targetArr: string[], raw?: any) => {
+      if (!raw) return;
+      const str = typeof raw === 'string' ? raw : raw?.name || raw?.label || raw?.lang || '';
+      if (!str || typeof str !== 'string') return;
+      const parts = str.split(/[,/|•+]+/).map((s) => s.trim()).filter(Boolean);
+      for (const part of parts) {
+        if (
+          !part ||
+          part.toLowerCase() === 'default' ||
+          part.toLowerCase() === 'default audio' ||
+          part.toLowerCase() === 'unknown' ||
+          part.toLowerCase() === 'und' ||
+          part.toLowerCase().startsWith('audio track') ||
+          isQualityKeyString(part)
+        ) {
+          continue;
+        }
+        const normalized = ClientHlsDownloader.normalizeLanguageLabel(part, part) || part;
+        if (!normalized || isQualityKeyString(normalized)) continue;
+        if (!targetArr.some((m) => m.toLowerCase() === normalized.toLowerCase())) {
+          targetArr.push(normalized);
+        }
+        if (!merged.some((m) => m.toLowerCase() === normalized.toLowerCase())) {
+          merged.push(normalized);
+        }
       }
     };
 
-    // 1. Live discovered HLS #EXT-X-MEDIA:TYPE=AUDIO tracks from active player
+    const epPart0 =
+      Array.isArray(currentEpisode?.videoLinks) &&
+      currentEpisode.videoLinks.length > 0 &&
+      typeof currentEpisode.videoLinks[0] === 'object'
+        ? currentEpisode.videoLinks[0]
+        : null;
+    const contentPart0 =
+      Array.isArray(content.videoLinks) &&
+      content.videoLinks.length > 0 &&
+      typeof content.videoLinks[0] === 'object'
+        ? content.videoLinks[0]
+        : null;
+
+    // --- 1. Server 1 Specific Languages ---
+    s1DiscoveredAudioTracks.forEach((l) => addLangTo(s1List, l));
+    if (primaryServerUrl) {
+      const cachedS1 = SmartStreamService.getCachedStreamMeta(primaryServerUrl);
+      if (cachedS1 && Array.isArray(cachedS1.audioTracks)) {
+        cachedS1.audioTracks.forEach((l) => addLangTo(s1List, l));
+      }
+    }
+    const s1VerifiedAudios = isSeries && !isMovie
+      ? (currentEpisode as any)?.audioTracks || epPart0?.audioTracks
+      : (activeMoviePart as any)?.audioTracks || contentPart0?.audioTracks || (content as any)?.audioTracks;
+    if (Array.isArray(s1VerifiedAudios)) {
+      s1VerifiedAudios.forEach((l) => addLangTo(s1List, l));
+    }
+    if (currentEpisode?.videoSources && typeof currentEpisode.videoSources === 'object') {
+      Object.keys(currentEpisode.videoSources).forEach((l) => addLangTo(s1List, l));
+    }
+    if (activeMoviePart && typeof activeMoviePart === 'object' && activeMoviePart.videoSources && typeof activeMoviePart.videoSources === 'object') {
+      Object.keys(activeMoviePart.videoSources).forEach((l) => addLangTo(s1List, l));
+    }
+    if (content.videoSources && typeof content.videoSources === 'object') {
+      Object.keys(content.videoSources).forEach((l) => addLangTo(s1List, l));
+    }
+
+    // --- 2. Server 2 Specific Languages ---
+    s2DiscoveredAudioTracks.forEach((l) => addLangTo(s2List, l));
+    if (secondaryServerUrl) {
+      const cachedS2 = SmartStreamService.getCachedStreamMeta(secondaryServerUrl);
+      if (cachedS2 && Array.isArray(cachedS2.audioTracks)) {
+        cachedS2.audioTracks.forEach((l) => addLangTo(s2List, l));
+      }
+    }
+    const s2VerifiedAudios = isSeries && !isMovie
+      ? (currentEpisode as any)?.secondaryAudioTracks || epPart0?.secondaryAudioTracks
+      : (activeMoviePart as any)?.secondaryAudioTracks || contentPart0?.secondaryAudioTracks || (content as any)?.secondaryAudioTracks;
+    if (Array.isArray(s2VerifiedAudios)) {
+      s2VerifiedAudios.forEach((l) => addLangTo(s2List, l));
+    }
+    if (secondaryVideoSources && typeof secondaryVideoSources === 'object') {
+      Object.keys(secondaryVideoSources).forEach((l) => addLangTo(s2List, l));
+    }
+
+    // --- 3. Active Player Discovered Tracks ---
     if (discoveredAudioTracks.length > 0) {
-      discoveredAudioTracks.forEach(addUnique);
+      discoveredAudioTracks.forEach((l) =>
+        addLangTo(selectedServer === 'server2' ? s2List : s1List, l)
+      );
     }
 
-    // 2. Also check cached stream metadata for the active server URL
-    const activeTargetUrl = selectedServer === 'server2' && secondaryServerUrl ? secondaryServerUrl : primaryServerUrl;
-    if (activeTargetUrl) {
-      const cachedMeta = SmartStreamService.getCachedStreamMeta(activeTargetUrl);
-      if (cachedMeta && Array.isArray(cachedMeta.audioTracks)) {
-        cachedMeta.audioTracks.forEach(addUnique);
+    // --- 4. Content / Episode General Configured Languages (Always merged so BOTH Server 1 & Server 2 display ALL languages!) ---
+    const generalLangs: string[] = [];
+    const partLangs =
+      (activeMoviePart as any)?.languages ||
+      (currentEpisode as any)?.languages ||
+      (currentEpisode as any)?.audioLanguages;
+    if (Array.isArray(partLangs)) {
+      partLangs.forEach((l: any) => addLangTo(generalLangs, l));
+    }
+    if (typeof (currentEpisode as any)?.language === 'string') {
+      addLangTo(generalLangs, (currentEpisode as any).language);
+    }
+    if (Array.isArray(content.availableLanguages)) {
+      content.availableLanguages.forEach((l) => addLangTo(generalLangs, l));
+    }
+    if (Array.isArray(content.languages)) {
+      content.languages.forEach((l) => addLangTo(generalLangs, l));
+    }
+    if (Array.isArray((content as any)?.audioLanguages)) {
+      (content as any).audioLanguages.forEach((l: any) => addLangTo(generalLangs, l));
+    }
+    if (typeof content.language === 'string') {
+      addLangTo(generalLangs, content.language);
+    }
+
+    // Smart Cross-Server Attribution:
+    // If Server 1 has known specific languages (e.g. Hindi, English) and generalLangs has an extra language (e.g. Japanese),
+    // attribute that extra language to Server 2 when Server 2 exists (and vice versa).
+    const hasS1 = Boolean(primaryServerUrl);
+    const hasS2 = Boolean(secondaryServerUrl || Object.keys(secondaryServerQualityLinks).length > 0);
+    if (hasS1 && hasS2) {
+      if (s1List.length > 0 && s2List.length === 0) {
+        generalLangs.forEach((gl) => {
+          if (!s1List.some((s1) => s1.toLowerCase() === gl.toLowerCase())) {
+            addLangTo(s2List, gl);
+          }
+        });
+      } else if (s2List.length > 0 && s1List.length === 0) {
+        generalLangs.forEach((gl) => {
+          if (!s2List.some((s2) => s2.toLowerCase() === gl.toLowerCase())) {
+            addLangTo(s1List, gl);
+          }
+        });
       }
     }
 
-    // 3. Include videoSources & configured multi-audio tracks when on Server 1 OR when Server 2 stream hasn't exposed multiple tracks yet
-    if (selectedServer === 'server1' || merged.length <= 1) {
-      if (playerVideoSources && typeof playerVideoSources === 'object' && Object.keys(playerVideoSources).length > 0) {
-        Object.keys(playerVideoSources).forEach(addUnique);
-      }
-      if (currentEpisode?.videoSources && typeof currentEpisode.videoSources === 'object') {
-        Object.keys(currentEpisode.videoSources).forEach(addUnique);
-      }
-      if (activeMoviePart && typeof activeMoviePart === 'object' && activeMoviePart.videoSources && typeof activeMoviePart.videoSources === 'object') {
-        Object.keys(activeMoviePart.videoSources).forEach(addUnique);
-      }
-      if (content.videoSources && typeof content.videoSources === 'object') {
-        Object.keys(content.videoSources).forEach(addUnique);
-      }
-    }
-
-    // 4. Episode / Movie / Content configured languages (Always merge if <= 1 track discovered so multi-language content on Server 2 always shows all languages)
-    if (merged.length <= 1 || selectedServer === 'server1') {
-      const partLangs = (activeMoviePart as any)?.languages || (activeMoviePart as any)?.audioTracks || (currentEpisode as any)?.languages || (currentEpisode as any)?.audioTracks || (currentEpisode as any)?.audioLanguages;
-      if (Array.isArray(partLangs) && partLangs.length > 0) {
-        partLangs.forEach((l: any) => addUnique(typeof l === 'string' ? l : (l?.name || l?.label || l?.lang)));
-      }
-      if (content.availableLanguages && content.availableLanguages.length > 0) {
-        content.availableLanguages.forEach(addUnique);
-      }
-      if (content.languages && content.languages.length > 0) {
-        content.languages.forEach(addUnique);
-      }
-      if ((content as any)?.audioLanguages && (content as any).audioLanguages.length > 0) {
-        (content as any).audioLanguages.forEach(addUnique);
-      }
-    }
     if (merged.length === 0) {
       if (activeLanguage && !isQualityKeyString(activeLanguage)) {
-        addUnique(activeLanguage);
+        addLangTo(merged, activeLanguage);
       }
       if (merged.length === 0) {
         merged.push('Hindi');
       }
     }
-    return merged;
-  }, [discoveredAudioTracks, selectedServer, primaryServerUrl, secondaryServerUrl, playerVideoSources, activeMoviePart, currentEpisode, content.videoSources, content.availableLanguages, content.languages, (content as any)?.audioLanguages, activeLanguage]);
+
+    return {
+      s1SpecificLanguages: s1List,
+      s2SpecificLanguages: s2List,
+      availableLanguages: merged,
+    };
+  }, [
+    s1DiscoveredAudioTracks,
+    s2DiscoveredAudioTracks,
+    discoveredAudioTracks,
+    selectedServer,
+    primaryServerUrl,
+    secondaryServerUrl,
+    secondaryServerQualityLinks,
+    secondaryVideoSources,
+    playerVideoSources,
+    activeMoviePart,
+    currentEpisode,
+    isSeries,
+    isMovie,
+    content.videoSources,
+    content.availableLanguages,
+    content.languages,
+    content.language,
+    (content as any)?.audioLanguages,
+    (content as any)?.audioTracks,
+    (content as any)?.secondaryAudioTracks,
+    activeLanguage,
+  ]);
+
+  // Unified Cross-Server Language Selection Handler:
+  // If user is on Server 1 (at e.g. 480p or 1080p) and selects a language available on Server 2,
+  // automatically switches to Server 2 while keeping the exact same quality and playback timestamp!
+  const handleUnifiedLanguageSelect = useCallback(
+    (rawLang: string) => {
+      const s2TagMatch = /\[S2\]/i.test(rawLang);
+      const s1TagMatch = /\[S1\]/i.test(rawLang);
+      const cleanLang = rawLang.replace(/\s*\[(S1|S2)\]/i, '').trim();
+      if (!cleanLang) return;
+
+      saveProgressNow(playbackPosition, false, true);
+      lastUserSelectedLangRef.current = cleanLang;
+      setActiveLanguage(cleanLang);
+      try {
+        localStorage.setItem('maxplay_preferred_lang', cleanLang);
+      } catch {}
+
+      const matchesInList = (lang: string, list: string[]) =>
+        list.some(
+          (item) =>
+            item.toLowerCase() === lang.toLowerCase() ||
+            ClientHlsDownloader.matchesTargetLanguage(
+              { name: item, language: item, friendly: item },
+              lang
+            )
+        );
+
+      const hasS1 = Boolean(primaryServerUrl);
+      const hasS2 = Boolean(secondaryServerUrl || Object.keys(secondaryServerQualityLinks).length > 0);
+      const inS1 = matchesInList(cleanLang, s1SpecificLanguages);
+      const inS2 = matchesInList(cleanLang, s2SpecificLanguages);
+      const qualBadge = activeQuality && activeQuality !== 'auto' ? ` • ${activeQuality.toUpperCase()}` : '';
+
+      if (selectedServer === 'server1' && hasS2) {
+        if (s2TagMatch || (!inS1 && (inS2 || s1SpecificLanguages.length > 0))) {
+          handleSelectServer('server2');
+          setToastMessage(`Switched to Server 2 • ${cleanLang}${qualBadge}`);
+          setTimeout(() => setToastMessage(null), 2800);
+          return;
+        }
+      } else if (selectedServer === 'server2' && hasS1) {
+        if (s1TagMatch || (!inS2 && (inS1 || s2SpecificLanguages.length > 0))) {
+          handleSelectServer('server1');
+          setToastMessage(`Switched to Server 1 • ${cleanLang}${qualBadge}`);
+          setTimeout(() => setToastMessage(null), 2800);
+          return;
+        }
+      }
+    },
+    [
+      playbackPosition,
+      primaryServerUrl,
+      secondaryServerUrl,
+      secondaryServerQualityLinks,
+      s1SpecificLanguages,
+      s2SpecificLanguages,
+      selectedServer,
+      activeQuality,
+    ]
+  );
 
   // Proactively probe both Server 1 and Server 2 master playlists so multi-language audio tracks and cross-server qualities (S1 / S2) appear immediately
   useEffect(() => {
@@ -1603,6 +1883,7 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
       try {
         let m3u8Url = targetUrl;
         const setSrvQualities = srv === 'server2' ? setS2DiscoveredQualities : setS1DiscoveredQualities;
+        const setSrvAudios = srv === 'server2' ? setS2DiscoveredAudioTracks : setS1DiscoveredAudioTracks;
 
         if (SmartStreamService.isExtractableSource(targetUrl, true)) {
           const res = await SmartStreamService.resolveStream(targetUrl, { forceRefresh: false });
@@ -1610,11 +1891,17 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
           if (res?.streamUrl) {
             m3u8Url = res.streamUrl;
             const meta = SmartStreamService.getCachedStreamMeta(targetUrl);
-            if (srv === selectedServer && meta && Array.isArray(meta.audioTracks) && meta.audioTracks.length > 0) {
-              setDiscoveredAudioTracks((prev) => {
+            if (meta && Array.isArray(meta.audioTracks) && meta.audioTracks.length > 0) {
+              setSrvAudios((prev) => {
                 const next = Array.from(new Set([...prev, ...meta.audioTracks!]));
                 return next.length !== prev.length ? next : prev;
               });
+              if (srv === selectedServer) {
+                setDiscoveredAudioTracks((prev) => {
+                  const next = Array.from(new Set([...prev, ...meta.audioTracks!]));
+                  return next.length !== prev.length ? next : prev;
+                });
+              }
             }
             if (meta && Array.isArray(meta.qualities) && meta.qualities.length > 0) {
               setSrvQualities((prev) => {
@@ -1633,13 +1920,19 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
         if (m3u8Url && (m3u8Url.includes('.m3u8') || m3u8Url.includes('m3u8') || m3u8Url.includes('master.txt'))) {
           const parsed = await ClientHlsDownloader.probeMasterPlaylist(m3u8Url);
           if (cancelled || !parsed) return;
-          if (srv === selectedServer && parsed.audioTracks && parsed.audioTracks.length > 0) {
+          if (parsed.audioTracks && parsed.audioTracks.length > 0) {
             const labels = parsed.audioTracks.map((a: any) => (typeof a === 'string' ? a : a?.label || a?.name || '')).filter(Boolean);
             if (labels.length > 0) {
-              setDiscoveredAudioTracks((prev) => {
+              setSrvAudios((prev) => {
                 const next = Array.from(new Set([...prev, ...labels]));
                 return next.length !== prev.length ? next : prev;
               });
+              if (srv === selectedServer) {
+                setDiscoveredAudioTracks((prev) => {
+                  const next = Array.from(new Set([...prev, ...labels]));
+                  return next.length !== prev.length ? next : prev;
+                });
+              }
             }
           }
           if (parsed.qualities && parsed.qualities.length > 0) {
@@ -2559,14 +2852,9 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
               onGlobalSeek={allCurrentParts.length > 1 ? handleGlobalSeek : undefined}
               activeLanguage={activeLanguage}
               activeQuality={activeQuality}
+              selectedServer={selectedServer}
               crossServerQualities={crossServerQualities}
-              onLanguageChange={(lang) => {
-                setActiveLanguage(lang);
-                try {
-                  localStorage.setItem('maxplay_preferred_lang', lang);
-                } catch {}
-                saveProgressNow(playbackPosition, false, true);
-              }}
+              onLanguageChange={handleUnifiedLanguageSelect}
               onQualityChange={(qual) => {
                 const s2Match = /\[S2\]/i.test(qual);
                 const s1Match = /\[S1\]/i.test(qual);
@@ -2587,7 +2875,14 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
                   localStorage.setItem('maxplay_video_quality', cleanQ);
                 } catch {}
               }}
-              onDiscoveredAudioTracks={setDiscoveredAudioTracks}
+              onDiscoveredAudioTracks={(tracks) => {
+                setDiscoveredAudioTracks(tracks);
+                if (selectedServer === 'server2') {
+                  setS2DiscoveredAudioTracks(tracks);
+                } else {
+                  setS1DiscoveredAudioTracks(tracks);
+                }
+              }}
               onDiscoveredQualities={(quals) => {
                 setDiscoveredQualities(quals);
                 if (selectedServer === 'server2') {
@@ -2999,13 +3294,7 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
                     contentTitle={content.title}
                     languages={availableLanguages}
                     activeLanguage={activeLanguage || availableLanguages[0] || ''}
-                    onSelectLanguage={(newLang) => {
-                      saveProgressNow(playbackPosition, false, true);
-                      setActiveLanguage(newLang);
-                      try {
-                        localStorage.setItem('maxplay_preferred_lang', newLang);
-                      } catch {}
-                    }}
+                    onSelectLanguage={handleUnifiedLanguageSelect}
                   />
 
                   <SoloLevelingSelectorModal

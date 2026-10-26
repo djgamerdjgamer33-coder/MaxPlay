@@ -974,7 +974,45 @@ class MainActivity : AppCompatActivity() {
             try {
                 if (popunderDialog?.isShowing == true) return@runOnUiThread
 
-                val dialog = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar)
+                // Build automatic Adsterra mirror failover queue for the exact same publisher placement key
+                val mirrorDomains = listOf(
+                    "www.highperformanceformat.com",
+                    "www.highratecpm.com",
+                    "www.topcreativeformat.com",
+                    "www.profitableratecpmnetwork.com"
+                )
+                val knownAdsterraHosts = listOf(
+                    "profitableratecpmnetwork.com",
+                    "highperformanceformat.com",
+                    "highratecpm.com",
+                    "topcreativeformat.com",
+                    "effectivegatecpm.com"
+                )
+
+                val candidateUrls = mutableListOf<String>()
+                try {
+                    val parsedUri = android.net.Uri.parse(cleanUrl)
+                    val host = (parsedUri.host ?: "").lowercase()
+                    val isAdsterra = knownAdsterraHosts.any { host.contains(it) }
+                    if (isAdsterra) {
+                        // Put highperformanceformat.com and highratecpm.com first when profitableratecpmnetwork.com has ISP SSL blocks
+                        for (mirrorHost in mirrorDomains) {
+                            val rebuilt = parsedUri.buildUpon().authority(mirrorHost).scheme("https").build().toString()
+                            if (!candidateUrls.contains(rebuilt)) {
+                                candidateUrls.add(rebuilt)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+                if (!candidateUrls.contains(cleanUrl)) {
+                    candidateUrls.add(0, cleanUrl)
+                }
+
+                var currentMirrorIndex = 0
+                var isAdRevealed = false
+                var triedOkHttpFallback = false
+
+                val dialog = android.app.Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
                 dialog.setCancelable(true)
                 dialog.setOnCancelListener {
                     closeNativePopunderAd()
@@ -1045,7 +1083,19 @@ class MainActivity : AppCompatActivity() {
                 topBar.addView(labelView)
                 topBar.addView(closeBtn)
 
-                var triedFallback = false
+                fun revealAdDialogIfReady() {
+                    if (isAdRevealed) return
+                    if (popunderDialog != dialog || !dialog.isShowing) return
+                    isAdRevealed = true
+                    try {
+                        dialog.window?.apply {
+                            clearFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
+                            val lp = attributes
+                            lp.alpha = 1.0f
+                            attributes = lp
+                        }
+                    } catch (_: Exception) {}
+                }
 
                 val adWeb = WebView(this).apply {
                     setBackgroundColor(Color.parseColor("#0A0A0A"))
@@ -1054,17 +1104,62 @@ class MainActivity : AppCompatActivity() {
                         0,
                         1f
                     )
+                    val mobileChromeUa = (settings.userAgentString ?: "")
+                        .replace("; wv", "")
+                        .replace("Version/4.0 ", "")
+                        .trim()
+                        .ifBlank {
+                            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                        }
+
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
                         databaseEnabled = true
                         mediaPlaybackRequiresUserGesture = false
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                        userAgentString = InbuiltStreamScraper.DEFAULT_USER_AGENT
-                        setSupportMultipleWindows(false)
+                        userAgentString = mobileChromeUa
+                        setSupportMultipleWindows(true)
                         javaScriptCanOpenWindowsAutomatically = true
                     }
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onCreateWindow(
+                            view: WebView?,
+                            isDialog: Boolean,
+                            isUserGesture: Boolean,
+                            resultMsg: android.os.Message?
+                        ): Boolean {
+                            val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                            val tempWebView = WebView(this@MainActivity)
+                            tempWebView.webViewClient = object : WebViewClient() {
+                                override fun shouldOverrideUrlLoading(
+                                    v: WebView?,
+                                    request: WebResourceRequest?
+                                ): Boolean {
+                                    val targetUrl = request?.url?.toString()
+                                    if (!targetUrl.isNullOrBlank()) {
+                                        view?.loadUrl(targetUrl)
+                                    }
+                                    try { v?.destroy() } catch (_: Exception) {}
+                                    return true
+                                }
+
+                                @Deprecated("Deprecated in Java")
+                                override fun shouldOverrideUrlLoading(v: WebView?, url: String?): Boolean {
+                                    if (!url.isNullOrBlank()) {
+                                        view?.loadUrl(url)
+                                    }
+                                    try { v?.destroy() } catch (_: Exception) {}
+                                    return true
+                                }
+                            }
+                            transport.webView = tempWebView
+                            resultMsg.sendToTarget()
+                            return true
+                        }
+                    }
 
                     webViewClient = object : android.webkit.WebViewClient() {
                         private fun handleAdUrl(view: WebView?, rawTarget: String?): Boolean {
@@ -1091,6 +1186,7 @@ class MainActivity : AppCompatActivity() {
                                     if (parsedIntent.resolveActivity(packageManager) != null) {
                                         parsedIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                                         startActivity(parsedIntent)
+                                        closeNativePopunderAd()
                                     }
                                 } catch (_: Exception) {}
                                 return true
@@ -1102,59 +1198,57 @@ class MainActivity : AppCompatActivity() {
                                 } catch (_: Exception) {}
                                 return true
                             }
-                            // Suppress unknown custom protocols (e.g. tg://, whatsapp://, fb://) from showing WebView error page
                             return true
                         }
 
-                        private fun handleMainFrameError(view: WebView?, failingUrl: String?) {
+                        private fun tryNextMirrorOrFallback(view: WebView?, failingUrl: String?) {
                             try {
                                 view?.stopLoading()
-                                // Immediately hide default Android WebView "Web page not available (net::ERR_SSL_PROTOCOL_ERROR)" page
-                                view?.loadDataWithBaseURL(
-                                    null,
-                                    "<html><body style='background:#0A0A0A;color:#71717A;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:13px;'>Loading sponsored content...</body></html>",
-                                    "text/html",
-                                    "UTF-8",
-                                    null
-                                )
                             } catch (_: Exception) {}
 
-                            val target = (failingUrl ?: cleanUrl).trim()
-                            if (!triedFallback && target.isNotBlank()) {
-                                triedFallback = true
+                            if (currentMirrorIndex + 1 < candidateUrls.size) {
+                                currentMirrorIndex++
+                                val nextMirrorUrl = candidateUrls[currentMirrorIndex]
+                                view?.post {
+                                    if (popunderDialog?.isShowing == true) {
+                                        view.loadUrl(nextMirrorUrl)
+                                    }
+                                }
+                                return
+                            }
+
+                            if (!triedOkHttpFallback) {
+                                triedOkHttpFallback = true
                                 Thread {
-                                    fun fetchAdFallbackHtml(urlToFetch: String): String? {
-                                        return try {
+                                    var recoveredHtml: String? = null
+                                    var recoveredBaseUrl: String = candidateUrls.firstOrNull() ?: cleanUrl
+                                    for (cand in candidateUrls) {
+                                        try {
                                             val req = okhttp3.Request.Builder()
-                                                .url(urlToFetch)
-                                                .header("User-Agent", InbuiltStreamScraper.DEFAULT_USER_AGENT)
+                                                .url(cand)
+                                                .header("User-Agent", mobileChromeUa)
+                                                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                                                 .build()
                                             InbuiltStreamScraper.okHttpClient.newCall(req).execute().use { res ->
-                                                if (res.isSuccessful) res.body?.string() else null
+                                                if (res.isSuccessful) {
+                                                    val bodyStr = res.body?.string()
+                                                    if (!bodyStr.isNullOrBlank() && bodyStr.length > 90) {
+                                                        recoveredHtml = bodyStr
+                                                        recoveredBaseUrl = cand
+                                                    }
+                                                }
                                             }
-                                        } catch (_: Exception) {
-                                            null
-                                        }
+                                            if (!recoveredHtml.isNullOrBlank()) break
+                                        } catch (_: Exception) {}
                                     }
-
-                                    var recoveredHtml: String? = null
-                                    var recoveredBaseUrl: String = target
-                                    try {
-                                        recoveredHtml = fetchAdFallbackHtml(target)
-                                        if (recoveredHtml.isNullOrBlank() && target.startsWith("https://", ignoreCase = true)) {
-                                            val httpUrl = "http://" + target.substring(8)
-                                            recoveredBaseUrl = httpUrl
-                                            recoveredHtml = fetchAdFallbackHtml(httpUrl)
-                                        }
-                                    } catch (_: Exception) {}
 
                                     runOnUiThread {
                                         if (popunderDialog?.isShowing != true) return@runOnUiThread
-                                        if (!recoveredHtml.isNullOrBlank() && recoveredHtml.length > 64) {
+                                        if (!recoveredHtml.isNullOrBlank()) {
                                             try {
                                                 view?.loadDataWithBaseURL(
                                                     recoveredBaseUrl,
-                                                    recoveredHtml,
+                                                    recoveredHtml!!,
                                                     "text/html",
                                                     "UTF-8",
                                                     null
@@ -1163,7 +1257,6 @@ class MainActivity : AppCompatActivity() {
                                                 closeNativePopunderAd()
                                             }
                                         } else {
-                                            // ISP completely blocked the ad domain — close silently so user never sees an error screen
                                             closeNativePopunderAd()
                                         }
                                     }
@@ -1185,13 +1278,45 @@ class MainActivity : AppCompatActivity() {
                             return handleAdUrl(view, url)
                         }
 
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            val loadedUrl = (url ?: "").trim()
+                            if (loadedUrl.isBlank() || loadedUrl == "about:blank") return
+
+                            view?.evaluateJavascript(
+                                "(function(){try{var b=document.body;if(!b)return 'EMPTY';var t=(b.innerText||'').trim();if(t.indexOf('ERR_')!==-1||t.indexOf('Web page not available')!==-1||t.indexOf('can\\x27t be reached')!==-1)return 'ERROR';var hasMedia=b.querySelectorAll('img,iframe,canvas,video,a,button,input,form').length>0;if(t.length>12||hasMedia)return 'OK';return 'WAIT';}catch(e){return 'WAIT';}})();"
+                            ) { result ->
+                                val status = (result ?: "").replace("\"", "").trim()
+                                when (status) {
+                                    "ERROR" -> tryNextMirrorOrFallback(view, loadedUrl)
+                                    "OK" -> revealAdDialogIfReady()
+                                    else -> {
+                                        // Allow 1.2s for JS redirect or dynamic ad DOM injection before re-checking
+                                        view.postDelayed({
+                                            if (popunderDialog?.isShowing != true) return@postDelayed
+                                            view.evaluateJavascript(
+                                                "(function(){try{var b=document.body;if(!b)return 'EMPTY';var t=(b.innerText||'').trim();if(t.indexOf('ERR_')!==-1||t.indexOf('Web page not available')!==-1)return 'ERROR';var hasMedia=b.querySelectorAll('img,iframe,canvas,video,a,button,input,form').length>0;return (t.length>8||hasMedia)?'OK':'EMPTY';}catch(e){return 'EMPTY';}})();"
+                                            ) { retryRes ->
+                                                val retryStatus = (retryRes ?: "").replace("\"", "").trim()
+                                                if (retryStatus == "OK") {
+                                                    revealAdDialogIfReady()
+                                                } else {
+                                                    tryNextMirrorOrFallback(view, loadedUrl)
+                                                }
+                                            }
+                                        }, 1200)
+                                    }
+                                }
+                            }
+                        }
+
                         override fun onReceivedError(
                             view: WebView?,
                             request: android.webkit.WebResourceRequest?,
                             error: android.webkit.WebResourceError?
                         ) {
                             if (request == null || request.isForMainFrame) {
-                                handleMainFrameError(view, request?.url?.toString())
+                                tryNextMirrorOrFallback(view, request?.url?.toString())
                             }
                         }
 
@@ -1202,7 +1327,17 @@ class MainActivity : AppCompatActivity() {
                             description: String?,
                             failingUrl: String?
                         ) {
-                            handleMainFrameError(view, failingUrl)
+                            tryNextMirrorOrFallback(view, failingUrl)
+                        }
+
+                        override fun onReceivedHttpError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            errorResponse: WebResourceResponse?
+                        ) {
+                            if (request?.isForMainFrame == true && (errorResponse?.statusCode ?: 200) >= 400) {
+                                tryNextMirrorOrFallback(view, request.url?.toString())
+                            }
                         }
 
                         @SuppressLint("WebViewClientOnReceivedSslError")
@@ -1211,7 +1346,8 @@ class MainActivity : AppCompatActivity() {
                             handler: android.webkit.SslErrorHandler?,
                             error: android.net.http.SslError?
                         ) {
-                            handler?.proceed()
+                            handler?.cancel()
+                            tryNextMirrorOrFallback(view, error?.url)
                         }
                     }
                 }
@@ -1220,10 +1356,25 @@ class MainActivity : AppCompatActivity() {
                 container.addView(adWeb)
                 dialog.setContentView(container)
 
+                // Keep dialog completely invisible and pass-through until real ad content finishes loading
+                dialog.window?.apply {
+                    addFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
+                    val lp = attributes
+                    lp.alpha = 0f
+                    attributes = lp
+                }
+
                 popunderDialog = dialog
                 popunderWebView = adWeb
                 dialog.show()
-                adWeb.loadUrl(cleanUrl)
+                adWeb.loadUrl(candidateUrls.first())
+
+                // Safety timeout: if no mirror renders real content within 9.5 seconds, dismiss silently
+                adWeb.postDelayed({
+                    if (popunderDialog == dialog && !isAdRevealed) {
+                        closeNativePopunderAd()
+                    }
+                }, 9500)
             } catch (_: Exception) {}
         }
         return true

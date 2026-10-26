@@ -154,6 +154,7 @@ interface InlinePlayerProps {
   onGlobalSeek?: (targetTime: number) => void;
   skipMarkers?: any;
   isSmartHls?: boolean;
+  selectedServer?: 'server1' | 'server2';
   crossServerQualities?: string[];
   onDiscoveredAudioTracks?: (tracks: string[]) => void;
   onDiscoveredQualities?: (qualities: string[]) => void;
@@ -184,6 +185,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
   onGlobalSeek,
   skipMarkers,
   isSmartHls,
+  selectedServer = 'server1',
   crossServerQualities = [],
   onDiscoveredAudioTracks,
   onDiscoveredQualities,
@@ -193,6 +195,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const prevStreamKeyRef = useRef<string | undefined>(streamKey);
+  const prevServerRef = useRef<'server1' | 'server2'>(selectedServer);
   
   // Gesture and volume states (synced with real Android hardware inside APK)
   const [brightness, setBrightness] = useState<number>(() => {
@@ -592,15 +595,21 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
   // Keep currentLanguage in sync with activeLanguage prop and immediately switch live HLS audio track when changed from Details Screen!
   useEffect(() => {
     let targetLang = currentLanguage;
-    if (activeLanguage && availableLanguages.some((l) => l.toLowerCase() === activeLanguage.toLowerCase())) {
-      const matched = availableLanguages.find((l) => l.toLowerCase() === activeLanguage.toLowerCase()) || activeLanguage;
+    const cleanActiveLang = (activeLanguage || '').replace(/\s*\[(S1|S2)\]/i, '').trim();
+    if (cleanActiveLang) {
+      const matched =
+        availableLanguages.find((l) => l.toLowerCase() === cleanActiveLang.toLowerCase()) ||
+        availableLanguages.find((l) =>
+          ClientHlsDownloader.matchesTargetLanguage({ name: l, language: l, friendly: l }, cleanActiveLang)
+        ) ||
+        cleanActiveLang;
       setCurrentLanguage(matched);
       targetLang = matched;
     } else if (availableLanguages.length > 0) {
       const fallback = availableLanguages[0];
       setCurrentLanguage(fallback);
       targetLang = fallback;
-      if (onLanguageChange && fallback !== activeLanguage) {
+      if (onLanguageChange && !activeLanguage) {
         onLanguageChange(fallback);
       }
     }
@@ -724,15 +733,24 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
     let links: Record<string, string> | null = null;
 
     if (videoSources && typeof videoSources === 'object' && Object.keys(videoSources).length > 0) {
-      const langKey =
-        currentLanguage && videoSources[currentLanguage]
-          ? currentLanguage
-          : availableLanguages.length > 0 && videoSources[availableLanguages[0]]
-          ? availableLanguages[0]
-          : Object.keys(videoSources)[0];
-      const langVal = langKey ? videoSources[langKey] : null;
+      const matchedKey =
+        (currentLanguage &&
+          Object.keys(videoSources).find((k) => k.toLowerCase().trim() === currentLanguage.toLowerCase().trim())) ||
+        (availableLanguages.length > 0 &&
+          Object.keys(videoSources).find((k) => k.toLowerCase().trim() === availableLanguages[0].toLowerCase().trim())) ||
+        Object.keys(videoSources)[0];
+      const langVal = matchedKey ? videoSources[matchedKey] : null;
       if (langVal && typeof langVal === 'object') {
-        links = { ...langVal, ...(qualityLinks && typeof qualityLinks === 'object' ? qualityLinks : {}) };
+        const cleanLangLinks: Record<string, string> = {};
+        Object.entries(langVal).forEach(([k, v]) => {
+          if (typeof v === 'string' && v.trim().length > 0) {
+            cleanLangLinks[k.trim()] = v.trim();
+          }
+        });
+        links = {
+          ...(qualityLinks && typeof qualityLinks === 'object' ? qualityLinks : {}),
+          ...cleanLangLinks,
+        };
       }
     }
 
@@ -773,7 +791,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
     }
 
     return ['auto'];
-  }, [videoSources, qualityLinks, currentLanguage, availableLanguages, hlsQualities, crossServerQualities]);
+  }, [videoSources, qualityLinks, currentLanguage, availableLanguages, hlsQualities, crossServerQualities, selectedServer]);
 
   // Pick the optimal video URL based on active server qualityLinks, language, and quality
   const activeVideoUrl = useMemo(() => {
@@ -781,16 +799,24 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
     let langStringUrl = '';
 
     if (videoSources && typeof videoSources === 'object' && Object.keys(videoSources).length > 0) {
-      const langKey =
-        currentLanguage && videoSources[currentLanguage]
-          ? currentLanguage
-          : availableLanguages.length > 0 && videoSources[availableLanguages[0]]
-          ? availableLanguages[0]
-          : Object.keys(videoSources)[0];
-      const langVal = langKey ? videoSources[langKey] : null;
+      const matchedKey =
+        (currentLanguage &&
+          Object.keys(videoSources).find((k) => k.toLowerCase().trim() === currentLanguage.toLowerCase().trim())) ||
+        (availableLanguages.length > 0 &&
+          Object.keys(videoSources).find((k) => k.toLowerCase().trim() === availableLanguages[0].toLowerCase().trim())) ||
+        Object.keys(videoSources)[0];
+      const langVal = matchedKey ? videoSources[matchedKey] : null;
       if (langVal && typeof langVal === 'object') {
-        // Explicit qualityLinks for the active server always takes priority over legacy videoSources
-        links = { ...langVal, ...(qualityLinks && typeof qualityLinks === 'object' ? qualityLinks : {}) };
+        const cleanLangLinks: Record<string, string> = {};
+        Object.entries(langVal).forEach(([k, v]) => {
+          if (typeof v === 'string' && v.trim().length > 0) {
+            cleanLangLinks[k.trim()] = v.trim();
+          }
+        });
+        links = {
+          ...(qualityLinks && typeof qualityLinks === 'object' ? qualityLinks : {}),
+          ...cleanLangLinks,
+        };
       } else if (typeof langVal === 'string' && langVal.trim().length > 0) {
         langStringUrl = SmartStreamService.sanitizeStreamUrl(langVal);
       }
@@ -802,7 +828,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
 
     if (links && typeof links === 'object' && Object.keys(links).length > 0) {
       const smartSelected = SmartStreamService.selectSourceUrlForQuality(
-        videoUrl || langStringUrl,
+        langStringUrl || videoUrl,
         links,
         currentQuality
       );
@@ -828,10 +854,10 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
       if (candidate) return SmartStreamService.sanitizeStreamUrl(candidate);
     }
 
-    if (videoUrl) return SmartStreamService.sanitizeStreamUrl(videoUrl);
     if (langStringUrl) return langStringUrl;
+    if (videoUrl) return SmartStreamService.sanitizeStreamUrl(videoUrl);
     return '';
-  }, [qualityLinks, videoSources, videoUrl, currentLanguage, currentQuality, availableLanguages, isSmartHls]);
+  }, [qualityLinks, videoSources, videoUrl, currentLanguage, currentQuality, availableLanguages, isSmartHls, selectedServer]);
 
 
   const [embedFallbackUrl, setEmbedFallbackUrl] = useState<string>('');
@@ -937,6 +963,25 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
     }
     return false;
   }, [currentQuality, actualQuality, availableQualities, onQualityChange]);
+
+  // When selectedServer switches (Server 1 <-> Server 2), preserve timestamp & quality while resetting stale server tracks
+  useEffect(() => {
+    if (prevServerRef.current !== selectedServer) {
+      prevServerRef.current = selectedServer;
+      const liveVideoTime = videoRef.current?.currentTime || 0;
+      const bestTime = Math.max(liveVideoTime, currentTime, savedSwitchTimeRef.current);
+      if (bestTime > 0.5) {
+        savedSwitchTimeRef.current = bestTime;
+      }
+      if ((videoRef.current && !videoRef.current.paused) || isPlaying || hasStarted) {
+        wasPlayingBeforeSwitchRef.current = true;
+      }
+      setHlsQualities([]);
+      setHlsAudioTracks([]);
+      setEmbedFallbackUrl('');
+      setPlaybackError(null);
+    }
+  }, [selectedServer, currentTime, isPlaying, hasStarted]);
 
   // Resolve Smart Stream URL (VOE / external hosters via backend proxy with 3-hour cache)
   useEffect(() => {
@@ -1210,10 +1255,18 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
       });
 
       hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => {
-        if (hls.audioTracks && hls.audioTracks[data.id]) {
+        if (hls.audioTracks && hls.audioTracks.length > 1 && hls.audioTracks[data.id]) {
           const trk = hls.audioTracks[data.id];
           const friendly = formatLanguageLabel(trk.name, trk.lang, data.id);
-          setCurrentLanguage(friendly);
+          if (
+            friendly &&
+            !friendly.toLowerCase().startsWith('audio track') &&
+            friendly.toLowerCase() !== 'default' &&
+            friendly.toLowerCase() !== 'und' &&
+            friendly.toLowerCase() !== 'unknown'
+          ) {
+            setCurrentLanguage(friendly);
+          }
         }
       });
 
@@ -1702,21 +1755,22 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
       wasPlayingBeforeSwitchRef.current = true;
     }
 
-    triggerQualitySwitchBanner(qual);
-    setCurrentQuality(qual);
-    prevActiveQualityPropRef.current = qual;
+    const cleanQual = qual.replace(/\s*\[(S1|S2)\]/i, '').trim() || 'auto';
+    triggerQualitySwitchBanner(cleanQual);
+    setCurrentQuality(cleanQual);
+    prevActiveQualityPropRef.current = cleanQual;
     try {
-      localStorage.setItem('maxplay_preferred_quality', qual);
+      localStorage.setItem('maxplay_preferred_quality', cleanQual);
     } catch {}
     if (onQualityChange) onQualityChange(qual);
 
     // If HLS stream has internal multi-quality levels, switch level immediately using widescreen-aware matcher
     if (hlsRef.current && isHlsStreamRef.current && hlsRef.current.levels && hlsRef.current.levels.length > 0) {
-      if (qual.toLowerCase() === 'auto') {
+      if (cleanQual.toLowerCase() === 'auto') {
         hlsRef.current.currentLevel = -1;
         hlsRef.current.nextLevel = -1;
       } else {
-        const levelIdx = findMatchingHlsLevelIndex(hlsRef.current.levels, qual);
+        const levelIdx = findMatchingHlsLevelIndex(hlsRef.current.levels, cleanQual);
         if (levelIdx !== -1) {
           hlsRef.current.nextLevel = levelIdx;
           hlsRef.current.currentLevel = levelIdx;

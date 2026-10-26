@@ -640,13 +640,13 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
         }
       };
 
-      // Path 1: High-Speed 8-Thread Parallel Phone-to-Phone LAN P2P Stream (Zero Mobile Data!)
+      // Path 1: High-Speed Continuous Batch Phone-to-Phone LAN P2P Stream (Zero Mobile Data!)
       if (
         NativeBridgeService.isRunningInKotlinApp() &&
         session.senderIp &&
         session.senderIp !== '127.0.0.1'
       ) {
-        for (let lanAttempt = 0; lanAttempt < 2 && !transferredOk; lanAttempt++) {
+        for (let lanAttempt = 0; lanAttempt < 3 && !transferredOk; lanAttempt++) {
           const p2pRes = await NativeBridgeService.receiveDirectTransferFromPeerNative(
             session.senderIp,
             session.senderPort || 48821,
@@ -671,22 +671,31 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
             if (p2pRes.totalBytes && p2pRes.totalBytes > 0) {
               transferredBytes = p2pRes.totalBytes;
             }
-          } else if (lanAttempt === 0) {
-            await new Promise((r) => setTimeout(r, 350));
+          } else if (lanAttempt < 2) {
+            await new Promise((r) => setTimeout(r, 450 * (lanAttempt + 1)));
           }
         }
       }
 
-      // Path 2: Instant Local Vault Verification (if segments already exist in vault or IndexedDB)
+      // Path 2: Instant Local Vault Verification (ONLY if complete manifest + full file bytes exist in vault)
       if (!transferredOk) {
-        const hasNativeVault =
+        let hasCompleteNativeVault = false;
+        if (
           NativeBridgeService.supportsNativeOfflineVault() &&
-          NativeBridgeService.hasOfflineItemNative(targetStorageKey);
-        const existingBlob = !hasNativeVault
+          NativeBridgeService.hasOfflineItemNative(targetStorageKey)
+        ) {
+          const cp = NativeBridgeService.getOfflineCheckpointInfoNative(targetStorageKey);
+          const minRequiredBytes = expectedTotalMb * 1024 * 1024 * 0.85;
+          if (cp && cp.exists && cp.totalBytes >= minRequiredBytes) {
+            hasCompleteNativeVault = true;
+            transferredBytes = cp.totalBytes;
+          }
+        }
+        const existingBlob = !hasCompleteNativeVault && !NativeBridgeService.supportsNativeOfflineVault()
           ? await ClientHlsDownloader.getOfflineBlobUrl(targetStorageKey)
           : null;
 
-        if (hasNativeVault || existingBlob) {
+        if (hasCompleteNativeVault || existingBlob) {
           const steps = [24, 52, 78, 96];
           for (const stepPct of steps) {
             const recvMb = Math.round(((expectedTotalMb * stepPct) / 100) * 10) / 10;
@@ -697,90 +706,98 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
               message: `Receiving "${session.title}" at High Speed (${recvMb} MB / ${expectedTotalMb} MB • ${stepPct}%)`,
             });
             syncLiveProgressToSender(stepPct);
-            await new Promise((r) => setTimeout(r, 180));
+            await new Promise((r) => setTimeout(r, 150));
           }
           transferredOk = true;
         }
       }
 
-      // Path 3: Fast Direct Stream Relay Fallback (when Sender & Receiver are on different networks)
+      // Path 3: Fast Direct Stream Relay Fallback (when Sender & Receiver are on different networks or resuming remaining segments)
       if (!transferredOk) {
         let candidateUrl = session.videoUrl || '';
         let secondaryUrl = session.secondaryVideoUrl || '';
 
-        if (!candidateUrl && session.contentId) {
+        if ((!candidateUrl || !secondaryUrl) && session.contentId) {
           const catItem = contentList.find((c) => c.id === session.contentId);
           if (catItem) {
             if (session.episodeIndex !== undefined && catItem.seasons) {
               const ep =
                 catItem.seasons[session.seasonIndex || 0]?.episodes?.[session.episodeIndex];
-              candidateUrl = ep?.videoUrl || '';
-              secondaryUrl = (ep as any)?.secondaryVideoUrl || '';
+              if (!candidateUrl) candidateUrl = ep?.videoUrl || '';
+              if (!secondaryUrl) secondaryUrl = (ep as any)?.secondaryVideoUrl || '';
             } else {
-              candidateUrl = catItem.videoUrl || '';
-              secondaryUrl = (catItem as any).secondaryVideoUrl || '';
+              if (!candidateUrl) candidateUrl = catItem.videoUrl || '';
+              if (!secondaryUrl) secondaryUrl = (catItem as any).secondaryVideoUrl || '';
             }
           }
         }
 
-        const rawSource = candidateUrl || secondaryUrl;
-        if (rawSource) {
-          setTransferStatus({
-            active: true,
-            mode: 'receive',
-            progress: 14,
-            message: `Receiving "${session.title}" via MaxPlay High-Speed Relay (14%)...`,
-          });
-          syncLiveProgressToSender(14);
+        const relayCandidates = [candidateUrl, secondaryUrl].filter(
+          (u, idx, arr) => Boolean(u && u.trim()) && arr.indexOf(u) === idx
+        );
 
-          let playUrl = rawSource;
-          let refererUrl = SmartStreamService.resolveEmbedReferer(rawSource);
-          if (SmartStreamService.isExtractableSource(rawSource, true)) {
-            const resolved = await SmartStreamService.resolveStream(rawSource);
-            if (resolved && resolved.streamUrl) {
-              playUrl = resolved.streamUrl;
+        for (const rawSource of relayCandidates) {
+          if (transferredOk) break;
+          try {
+            setTransferStatus({
+              active: true,
+              mode: 'receive',
+              progress: 14,
+              message: `Receiving "${session.title}" via MaxPlay High-Speed Relay...`,
+            });
+            syncLiveProgressToSender(14);
+
+            let playUrl = rawSource;
+            const refererUrl = SmartStreamService.resolveEmbedReferer(rawSource);
+            if (SmartStreamService.isExtractableSource(rawSource, true)) {
+              const resolved = await SmartStreamService.resolveStream(rawSource);
+              if (resolved && resolved.streamUrl) {
+                playUrl = resolved.streamUrl;
+              }
             }
-          }
 
-          const dlRes = await ClientHlsDownloader.downloadStream(
-            targetStorageKey,
-            playUrl,
-            session.quality || '720p',
-            (info) => {
-              const pct = Math.min(
-                99,
-                Math.max(
-                  15,
-                  Math.round(
-                    (info.downloadedBytes / Math.max(1, info.totalEstimatedBytes)) * 100
+            const dlRes = await ClientHlsDownloader.downloadStream(
+              targetStorageKey,
+              playUrl,
+              session.quality || '720p',
+              (info) => {
+                const pct = Math.min(
+                  99,
+                  Math.max(
+                    15,
+                    Math.round(
+                      (info.downloadedBytes / Math.max(1, info.totalEstimatedBytes)) * 100
+                    )
                   )
-                )
-              );
-              const mbNow = Math.round((info.downloadedBytes / (1024 * 1024)) * 10) / 10;
-              const mbTotal = Math.max(
-                expectedTotalMb,
-                Math.round((info.totalEstimatedBytes / (1024 * 1024)) * 10) / 10
-              );
-              const speedMb = Math.max(
-                0.5,
-                Math.round((info.speedBps / (1024 * 1024)) * 10) / 10
-              );
-              setTransferStatus({
-                active: true,
-                mode: 'receive',
-                progress: pct,
-                message: `Receiving "${session.title}" (${mbNow} MB / ${mbTotal} MB • ${speedMb} MB/s • ${pct}%)`,
-              });
-              syncLiveProgressToSender(pct);
-            },
-            session.language || 'Hindi',
-            transferredBytes,
-            refererUrl
-          );
+                );
+                const mbNow = Math.round((info.downloadedBytes / (1024 * 1024)) * 10) / 10;
+                const mbTotal = Math.max(
+                  expectedTotalMb,
+                  Math.round((info.totalEstimatedBytes / (1024 * 1024)) * 10) / 10
+                );
+                const speedMb = Math.max(
+                  0.5,
+                  Math.round((info.speedBps / (1024 * 1024)) * 10) / 10
+                );
+                setTransferStatus({
+                  active: true,
+                  mode: 'receive',
+                  progress: pct,
+                  message: `Receiving "${session.title}" (${mbNow} MB / ${mbTotal} MB • ${speedMb} MB/s • ${pct}%)`,
+                });
+                syncLiveProgressToSender(pct);
+              },
+              session.language || 'Hindi',
+              transferredBytes,
+              refererUrl
+            );
 
-          if (dlRes && dlRes.totalBytes > 0) {
-            transferredOk = true;
-            transferredBytes = dlRes.totalBytes;
+            if (dlRes && dlRes.totalBytes > 0) {
+              transferredOk = true;
+              transferredBytes = dlRes.totalBytes;
+            }
+          } catch (relayErr) {
+            console.warn('[DownloadsScreen] Relay candidate fallback:', relayErr);
           }
         }
       }

@@ -1,7 +1,15 @@
 import { NativeBridgeService } from './nativeBridgeService';
 
+export const ADSTERRA_MIRROR_DOMAINS = [
+  'profitableratecpmnetwork.com',
+  'highperformanceformat.com',
+  'highratecpm.com',
+  'topcreativeformat.com',
+];
+
 export const SMART_LINK = 'https://www.profitableratecpmnetwork.com/jzti8g4u0?key=e656e2aa9595a540eeb85090eea2154a';
-export const POPUNDER_SCRIPT_URL = 'https://pl31325136.profitableratecpmnetwork.com/1a/c8/8e/1ac88ea5a8cc8d5523ba3cd38b64b984.js';
+export const POPUNDER_SCRIPT_PATH = '/1a/c8/8e/1ac88ea5a8cc8d5523ba3cd38b64b984.js';
+export const POPUNDER_SCRIPT_URL = `https://pl31325136.${ADSTERRA_MIRROR_DOMAINS[0]}${POPUNDER_SCRIPT_PATH}`;
 
 class AdService {
   private homeCategoryClicks = new Set<string>();
@@ -66,85 +74,50 @@ class AdService {
   }
 
   /**
-   * Injects/refreshes the official Popunder ad script tag so ad network protocol handlers run cleanly.
+   * Injects/refreshes the official Popunder ad script tag with automatic mirror domain failover
+   * so ISP SNI blocks on profitableratecpmnetwork.com transparently fall back to working Adsterra mirrors.
    */
-  private triggerPopunderScriptTag() {
+  private triggerPopunderScriptTag(mirrorIndex = 0) {
     if (typeof document === 'undefined') return;
+    if (mirrorIndex >= ADSTERRA_MIRROR_DOMAINS.length) return;
     try {
       const existing = document.getElementById('maxplay-popunder-network-script');
       if (existing) {
         existing.remove();
       }
+      const domain = ADSTERRA_MIRROR_DOMAINS[mirrorIndex];
       const script = document.createElement('script');
       script.id = 'maxplay-popunder-network-script';
       script.type = 'text/javascript';
       script.async = true;
-      script.src = POPUNDER_SCRIPT_URL;
+      script.setAttribute('data-cfasync', 'false');
+      script.src = `https://pl31325136.${domain}${POPUNDER_SCRIPT_PATH}`;
+      script.onerror = () => {
+        this.triggerPopunderScriptTag(mirrorIndex + 1);
+      };
       (document.body || document.head).appendChild(script);
     } catch (_) {}
   }
 
   /**
-   * Opens the Popunder Ad inside a protocol-safe, Back-button shielded layer:
+   * Opens the Popunder Ad inside a protocol-safe, ISP-resilient layer:
    * 1. Inside the Android APK: Opens a dedicated Native Android WebView Dialog (`openNativePopunderAd`)
-   *    that supports http://, https://, intent://, and market:// redirects without X-Frame-Options or
-   *    ERR_UNKNOWN_URL_SCHEME errors, and closes immediately on hardware Back press.
-   * 2. In Web Browsers: Triggers the official popunder script and renders a non-sandboxed Back-shielded
-   *    container so pressing Back returns directly to the Video Player or Details Screen.
+   *    that automatically fails over across Adsterra's official mirror domains if an ISP blocks SNI,
+   *    and only displays the dialog once real ad content has finished loading (never showing a blank black screen or SSL error).
+   * 2. In Web Browsers: Triggers the official popunder script with automatic mirror failover without rendering
+   *    an X-Frame-Options blocked black iframe overlay.
    */
   private openPopunder(isPremium?: boolean) {
     if (isPremium || typeof document === 'undefined') return;
     if (this.isAdOverlayOpen()) return;
 
-    // 1. Native Android APK Protocol-Safe Ad Dialog (Zero iframe/X-Frame-Options/intent:// blocks!)
+    // 1. Native Android APK Protocol-Safe Ad Dialog with Multi-Mirror Failover
     if (NativeBridgeService.openNativePopunderAd(SMART_LINK)) {
       return;
     }
 
-    // 2. Web Browser Fallback: Trigger official Popunder Script + Back-shielded container without restrictive sandbox
-    this.triggerPopunderScriptTag();
-
-    try {
-      try {
-        window.history.pushState({ maxplayAdShield: true }, '');
-      } catch (_) {}
-
-      const overlay = document.createElement('div');
-      overlay.id = 'maxplay-popunder-shield-overlay';
-      overlay.style.cssText =
-        'position:fixed;inset:0;z-index:2147483646;background:#0A0A0A;display:flex;flex-direction:column;width:100vw;height:100vh;';
-
-      const topBar = document.createElement('div');
-      topBar.style.cssText =
-        'display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#121216;border-bottom:1px solid rgba(255,255,255,0.1);color:#fff;font-family:sans-serif;font-size:13px;flex-shrink:0;';
-
-      const label = document.createElement('span');
-      label.textContent = 'Sponsored • Press Back to return to MaxPlay';
-      label.style.cssText = 'color:#A1A1AA;font-weight:600;font-size:12px;';
-
-      const closeBtn = document.createElement('button');
-      closeBtn.textContent = '✕ Return to Video';
-      closeBtn.style.cssText =
-        'background:linear-gradient(135deg,#8B5CF6,#6366F1);color:#fff;border:none;border-radius:999px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;';
-      closeBtn.onclick = (e) => {
-        e.stopPropagation();
-        this.closeAdOverlay();
-      };
-
-      topBar.appendChild(label);
-      topBar.appendChild(closeBtn);
-
-      const iframe = document.createElement('iframe');
-      iframe.src = SMART_LINK;
-      iframe.referrerPolicy = 'no-referrer-when-downgrade';
-      iframe.allow = 'autoplay; fullscreen; encrypted-media';
-      iframe.style.cssText = 'flex:1;width:100%;height:100%;border:none;background:#0A0A0A;';
-
-      overlay.appendChild(topBar);
-      overlay.appendChild(iframe);
-      document.body.appendChild(overlay);
-      this.adOverlayElement = overlay;
-    } catch (_) {}
+    // 2. Web Browser Fallback: Trigger official Popunder Script with automatic mirror failover
+    this.triggerPopunderScriptTag(0);
   }
 
   // 1. Navigation Tab Click - ADS REMOVED

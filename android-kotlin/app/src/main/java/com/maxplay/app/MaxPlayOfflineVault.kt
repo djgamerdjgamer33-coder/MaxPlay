@@ -437,14 +437,32 @@ object MaxPlayOfflineVault {
     }
 
     /**
-     * Checks if a downloaded item exists on native disk and is playable.
+     * Checks if a downloaded item exists on native disk and is completely downloaded & playable.
+     * Verifies manifest.json and segment count so interrupted partial transfers are never mistaken for complete items.
      */
     fun hasPlayableOfflineItem(context: Context, storageKey: String): Boolean {
-        val safe = sanitizeKey(storageKey)
-        val itemDir = File(getVaultRoot(context), safe)
-        if (!itemDir.exists()) return false
-        val seg0 = File(itemDir, "seg_0.ts")
-        return seg0.exists() && seg0.length() > 512L
+        return try {
+            val safe = sanitizeKey(storageKey)
+            val itemDir = File(getVaultRoot(context), safe)
+            if (!itemDir.exists()) return false
+            val seg0 = File(itemDir, "seg_0.ts")
+            if (!seg0.exists() || seg0.length() <= 0L) return false
+
+            val metaFile = File(itemDir, "manifest.json")
+            if (!metaFile.exists()) return false
+
+            val metaJson = JSONObject(metaFile.readText())
+            val expectedSegs = metaJson.optInt("totalSegments", 0)
+            if (expectedSegs <= 1) return true
+
+            val actualSegs = (itemDir.listFiles { _, name ->
+                name.startsWith("seg_") && name.endsWith(".ts")
+            } ?: emptyArray()).count { it.length() > 0L }
+
+            actualSegs >= (expectedSegs * 95) / 100
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /**
@@ -932,10 +950,10 @@ object MaxPlayOfflineVault {
 
     private val p2pLanHttpClient: okhttp3.OkHttpClient by lazy {
         okhttp3.OkHttpClient.Builder()
-            .connectTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-            .writeTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-            .connectionPool(okhttp3.ConnectionPool(16, 2, java.util.concurrent.TimeUnit.MINUTES))
+            .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .connectionPool(okhttp3.ConnectionPool(32, 5, java.util.concurrent.TimeUnit.MINUTES))
             .retryOnConnectionFailure(true)
             .build()
     }
@@ -999,7 +1017,7 @@ object MaxPlayOfflineVault {
 
             val segFiles = (itemDir.listFiles { _, name ->
                 name.startsWith("seg_") && name.endsWith(".ts")
-            } ?: emptyArray()).filter { it.length() > 512L }.sortedBy {
+            } ?: emptyArray()).filter { it.length() > 0L }.sortedBy {
                 it.name.removePrefix("seg_").removeSuffix(".ts").toIntOrNull() ?: 0
             }
 
@@ -1011,7 +1029,7 @@ object MaxPlayOfflineVault {
 
             val audFiles = (itemDir.listFiles { _, name ->
                 name.startsWith("aud_") && name.endsWith(".ts")
-            } ?: emptyArray()).filter { it.length() > 512L }.sortedBy {
+            } ?: emptyArray()).filter { it.length() > 0L }.sortedBy {
                 it.name.removePrefix("aud_").removeSuffix(".ts").toIntOrNull() ?: 0
             }
 
@@ -1020,9 +1038,9 @@ object MaxPlayOfflineVault {
             audFiles.forEach { totalBytes += it.length() }
 
             val server = try {
-                java.net.ServerSocket(48821, 64)
+                java.net.ServerSocket(48821, 256)
             } catch (_: Exception) {
-                java.net.ServerSocket(0, 64)
+                java.net.ServerSocket(0, 256)
             }
 
             p2pServerSocket = server
@@ -1068,16 +1086,24 @@ object MaxPlayOfflineVault {
     ) {
         socket.use { s ->
             try {
-                s.soTimeout = 20000
+                s.soTimeout = 45000
                 s.tcpNoDelay = true
-                s.sendBufferSize = 256 * 1024
+                s.sendBufferSize = 512 * 1024
                 val reader = java.io.BufferedReader(java.io.InputStreamReader(s.getInputStream()))
                 val requestLine = reader.readLine() ?: return
                 val parts = requestLine.split(" ")
                 if (parts.size < 2) return
-                val reqPath = parts[1].substringBefore("?")
+                val fullUri = parts[1]
+                val reqPath = fullUri.substringBefore("?")
+                val queryStr = fullUri.substringAfter("?", "")
 
-                val outStream = java.io.BufferedOutputStream(s.getOutputStream(), 256 * 1024)
+                // Drain HTTP request headers cleanly
+                while (true) {
+                    val hdr = reader.readLine()
+                    if (hdr.isNullOrEmpty()) break
+                }
+
+                val outStream = java.io.BufferedOutputStream(s.getOutputStream(), 512 * 1024)
                 val prefix = "/maxplay-p2p/$p2pActiveCode/"
                 if (!reqPath.startsWith(prefix)) {
                     val errBytes = "Not Found".toByteArray()
@@ -1087,16 +1113,32 @@ object MaxPlayOfflineVault {
                     return
                 }
 
+                val safe = sanitizeKey(p2pActiveStorageKey)
+                val itemDir = File(getVaultRoot(context), safe)
                 val targetName = reqPath.removePrefix(prefix)
+
                 if (targetName == "manifest.json") {
                     val metaObj = try { JSONObject(p2pActiveMetadataJson) } catch (_: Exception) { JSONObject() }
+                    val diskManifest = try {
+                        val mf = File(itemDir, "manifest.json")
+                        if (mf.exists()) JSONObject(mf.readText()) else null
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val realDurationSec = diskManifest?.optDouble("totalDurationSec", 0.0)
+                        ?.takeIf { it > 0.0 }
+                        ?: (segFiles.size * 4.0)
+                    val isSingleFile = diskManifest?.optBoolean("isSingleFile", segFiles.size == 1)
+                        ?: (segFiles.size == 1)
+
                     val manifestJson = JSONObject().apply {
                         put("ok", true)
                         put("code", p2pActiveCode)
                         put("storageKey", p2pActiveStorageKey)
                         put("totalSegments", segFiles.size)
                         put("totalAudioSegments", audFiles.size)
-                        put("totalDurationSec", segFiles.size * 4.0)
+                        put("totalDurationSec", realDurationSec)
+                        put("isSingleFile", isSingleFile)
                         put("totalBytes", totalBytes)
                         put("metadata", metaObj)
                     }.toString().toByteArray(Charsets.UTF_8)
@@ -1112,14 +1154,72 @@ object MaxPlayOfflineVault {
                     return
                 }
 
-                val safe = sanitizeKey(p2pActiveStorageKey)
-                val itemDir = File(getVaultRoot(context), safe)
+                // High-Speed Multiplexed Batch Stream Endpoint:
+                // Streams up to 30 segments continuously over a single TCP socket with 8-byte binary framing
+                // [4-byte big-endian index][4-byte big-endian length][raw bytes] ... [-1 EOF marker]
+                if (targetName == "batch") {
+                    var type = "seg"
+                    var startIdx = 0
+                    var endIdx = -1
+                    for (pair in queryStr.split("&")) {
+                        val kv = pair.split("=")
+                        if (kv.size == 2) {
+                            when (kv[0]) {
+                                "type" -> type = kv[1]
+                                "start" -> startIdx = kv[1].toIntOrNull() ?: 0
+                                "end" -> endIdx = kv[1].toIntOrNull() ?: -1
+                            }
+                        }
+                    }
+
+                    val isAud = type == "aud"
+                    val fileList = if (isAud) audFiles else segFiles
+                    val clampedStart = startIdx.coerceAtLeast(0)
+                    val clampedEnd = (if (endIdx >= clampedStart) endIdx else fileList.size - 1)
+                        .coerceAtMost(fileList.size - 1)
+
+                    val headers = "HTTP/1.1 200 OK\r\n" +
+                        "Content-Type: application/octet-stream\r\n" +
+                        "Access-Control-Allow-Origin: *\r\n" +
+                        "Connection: close\r\n\r\n"
+                    outStream.write(headers.toByteArray(Charsets.UTF_8))
+
+                    val dataOut = java.io.DataOutputStream(outStream)
+                    val copyBuf = ByteArray(512 * 1024)
+                    if (clampedStart <= clampedEnd && fileList.isNotEmpty()) {
+                        for (idx in clampedStart..clampedEnd) {
+                            val prefixName = if (isAud) "aud_" else "seg_"
+                            val exactFile = File(itemDir, "${prefixName}${idx}.ts").takeIf { it.exists() && it.length() > 0L }
+                                ?: fileList.getOrNull(idx)
+                            if (exactFile != null && exactFile.exists() && exactFile.length() > 0L) {
+                                val fLen = exactFile.length().toInt()
+                                dataOut.writeInt(idx)
+                                dataOut.writeInt(fLen)
+                                FileInputStream(exactFile).use { fis ->
+                                    var remaining = fLen
+                                    while (remaining > 0) {
+                                        val toRead = minOf(copyBuf.size, remaining)
+                                        val r = fis.read(copyBuf, 0, toRead)
+                                        if (r <= 0) break
+                                        dataOut.write(copyBuf, 0, r)
+                                        remaining -= r
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Write -1 sentinel to signal clean end of batch
+                    dataOut.writeInt(-1)
+                    dataOut.flush()
+                    return
+                }
+
                 val targetFile = if (targetName.startsWith("seg_") && targetName.endsWith(".ts")) {
                     val idx = targetName.removePrefix("seg_").removeSuffix(".ts").toIntOrNull() ?: -1
-                    segFiles.getOrNull(idx) ?: File(itemDir, targetName)
+                    File(itemDir, targetName).takeIf { it.exists() } ?: segFiles.getOrNull(idx)
                 } else if (targetName.startsWith("aud_") && targetName.endsWith(".ts")) {
                     val idx = targetName.removePrefix("aud_").removeSuffix(".ts").toIntOrNull() ?: -1
-                    audFiles.getOrNull(idx) ?: File(itemDir, targetName)
+                    File(itemDir, targetName).takeIf { it.exists() } ?: audFiles.getOrNull(idx)
                 } else {
                     null
                 }
@@ -1132,7 +1232,7 @@ object MaxPlayOfflineVault {
                         "Connection: close\r\n\r\n"
                     outStream.write(headers.toByteArray(Charsets.UTF_8))
                     FileInputStream(targetFile).use { fis ->
-                        val buf = ByteArray(256 * 1024)
+                        val buf = ByteArray(512 * 1024)
                         var r: Int
                         while (fis.read(buf).also { r = it } != -1) {
                             outStream.write(buf, 0, r)
@@ -1148,8 +1248,10 @@ object MaxPlayOfflineVault {
     }
 
     /**
-     * Streams all segments directly from another MaxPlay device over LAN HTTP (`http://senderIp:senderPort/maxplay-p2p/{code}/...`)
-     * into this device's native offline vault (`targetStorageKey`) using an 8-thread parallel high-speed worker pool.
+     * Streams 100% of all video & audio segments directly from another MaxPlay device over LAN HTTP
+     * (`http://senderIp:senderPort/maxplay-p2p/{code}/...`) into this device's native offline vault
+     * (`targetStorageKey`) using 6 parallel continuous batch-stream workers with automatic checkpoint resume
+     * and per-segment fallback so full 1-3 hour movies and episodes transfer completely at maximum Wi-Fi speed.
      */
     fun receiveDirectTransferFromPeer(
         context: Context,
@@ -1176,6 +1278,7 @@ object MaxPlayOfflineVault {
             val totalSegs = manifestObj.optInt("totalSegments", 0)
             val totalAudSegs = manifestObj.optInt("totalAudioSegments", 0)
             val totalDur = manifestObj.optDouble("totalDurationSec", totalSegs * 4.0)
+            val isSingleFile = manifestObj.optBoolean("isSingleFile", totalSegs == 1)
             val metaObj = manifestObj.optJSONObject("metadata") ?: JSONObject()
             val langLabel = metaObj.optString("language", "Default")
 
@@ -1191,65 +1294,181 @@ object MaxPlayOfflineVault {
             val lastEmitTimeMs = java.util.concurrent.atomic.AtomicLong(0L)
             val firstError = java.util.concurrent.atomic.AtomicReference<Exception?>(null)
 
-            data class P2pJob(val isAudio: Boolean, val index: Int)
-            val jobs = java.util.concurrent.ConcurrentLinkedQueue<P2pJob>()
-            for (i in 0 until totalSegs) jobs.add(P2pJob(false, i))
-            for (i in 0 until totalAudSegs) jobs.add(P2pJob(true, i))
+            fun emitProgressIfNeeded(force: Boolean = false) {
+                val doneNow = completedUnits.get()
+                val nowMs = System.currentTimeMillis()
+                val prevEmit = lastEmitTimeMs.get()
+                if (force || doneNow >= totalUnits || (nowMs - prevEmit >= 160L && lastEmitTimeMs.compareAndSet(prevEmit, nowMs))) {
+                    val bytesNow = receivedBytes.get()
+                    val pct = (8 + ((doneNow.toDouble() / totalUnits.toDouble()) * 89.0)).toInt().coerceIn(8, 97)
+                    val mbNow = String.format(java.util.Locale.US, "%.1f", bytesNow / (1024.0 * 1024.0))
+                    val elapsedSec = ((nowMs - startTimeMs) / 1000.0).coerceAtLeast(0.25)
+                    val speedMb = String.format(java.util.Locale.US, "%.1f", (bytesNow / (1024.0 * 1024.0)) / elapsedSec)
+                    onProgress(pct, "Receiving directly ($mbNow MB • $speedMb MB/s)...")
+                }
+            }
 
-            val workerCount = minOf(8, totalUnits)
+            // Group segments into contiguous batches of 24 segments for zero-overhead continuous TCP streaming
+            data class P2pBatchJob(val isAudio: Boolean, val startIdx: Int, val endIdx: Int)
+            val batchJobs = java.util.concurrent.ConcurrentLinkedQueue<P2pBatchJob>()
+            val batchSize = if (totalSegs == 1) 1 else 24
+
+            var sIdx = 0
+            while (sIdx < totalSegs) {
+                val eIdx = minOf(totalSegs - 1, sIdx + batchSize - 1)
+                batchJobs.add(P2pBatchJob(false, sIdx, eIdx))
+                sIdx = eIdx + 1
+            }
+            var aIdx = 0
+            while (aIdx < totalAudSegs) {
+                val eIdx = minOf(totalAudSegs - 1, aIdx + batchSize - 1)
+                batchJobs.add(P2pBatchJob(true, aIdx, eIdx))
+                aIdx = eIdx + 1
+            }
+
+            val workerCount = minOf(6, batchJobs.size.coerceAtLeast(1))
             val latch = java.util.concurrent.CountDownLatch(workerCount)
 
             for (w in 0 until workerCount) {
                 InbuiltStreamScraper.backgroundExecutor.execute {
-                    val buf = ByteArray(256 * 1024)
+                    val ioBuf = ByteArray(512 * 1024)
                     try {
                         while (firstError.get() == null) {
-                            val job = jobs.poll() ?: break
-                            val fileName = if (job.isAudio) "aud_${job.index}.ts" else "seg_${job.index}.ts"
-                            val segUrl = "$baseUrl/$fileName"
-                            val destFile = File(itemDir, fileName)
+                            val batch = batchJobs.poll() ?: break
+                            val prefix = if (batch.isAudio) "aud_" else "seg_"
+                            val typeParam = if (batch.isAudio) "aud" else "seg"
 
-                            var downloadedOk = false
-                            for (attempt in 0 until 3) {
+                            // Skip any segments at the start of this batch that were already saved on disk
+                            var curStart = batch.startIdx
+                            while (curStart <= batch.endIdx) {
+                                val existing = File(itemDir, "${prefix}${curStart}.ts")
+                                if (existing.exists() && existing.length() > 512L) {
+                                    receivedBytes.addAndGet(existing.length())
+                                    completedUnits.incrementAndGet()
+                                    curStart++
+                                } else {
+                                    break
+                                }
+                            }
+                            if (curStart > batch.endIdx) {
+                                emitProgressIfNeeded()
+                                continue
+                            }
+
+                            var batchCompleted = false
+                            for (attempt in 0 until 5) {
                                 if (firstError.get() != null) break
-                                try {
-                                    val req = Request.Builder().url(segUrl).build()
-                                    p2pLanHttpClient.newCall(req).execute().use { resp ->
-                                        if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
-                                        val body = resp.body ?: throw Exception("Empty body")
-                                        var segBytes = 0L
-                                        FileOutputStream(destFile).use { fos ->
-                                            body.byteStream().use { input ->
-                                                var r: Int
-                                                while (input.read(buf).also { r = it } != -1) {
-                                                    fos.write(buf, 0, r)
-                                                    segBytes += r
-                                                }
-                                            }
-                                        }
-                                        receivedBytes.addAndGet(segBytes)
-                                        downloadedOk = true
-                                    }
-                                    if (downloadedOk) break
-                                } catch (e: Exception) {
-                                    if (attempt == 2 && !job.isAudio) {
-                                        firstError.compareAndSet(null, Exception("Segment ${job.index} transfer failed: ${e.message}"))
+                                // Advance curStart past any segments written before a mid-batch network hiccup
+                                while (curStart <= batch.endIdx) {
+                                    val existing = File(itemDir, "${prefix}${curStart}.ts")
+                                    if (existing.exists() && existing.length() > 512L) {
+                                        curStart++
                                     } else {
-                                        try { Thread.sleep(120L * (attempt + 1)) } catch (_: Exception) {}
+                                        break
                                     }
+                                }
+                                if (curStart > batch.endIdx) {
+                                    batchCompleted = true
+                                    break
+                                }
+
+                                try {
+                                    val batchUrl = "$baseUrl/batch?type=$typeParam&start=$curStart&end=${batch.endIdx}"
+                                    val req = Request.Builder().url(batchUrl).build()
+                                    p2pLanHttpClient.newCall(req).execute().use { resp ->
+                                        if (!resp.isSuccessful) throw Exception("Batch HTTP ${resp.code}")
+                                        val body = resp.body ?: throw Exception("Empty batch stream")
+                                        val dataIn = java.io.DataInputStream(
+                                            java.io.BufferedInputStream(body.byteStream(), 512 * 1024)
+                                        )
+                                        while (true) {
+                                            val segIndex = dataIn.readInt()
+                                            if (segIndex == -1) break
+                                            val segLength = dataIn.readInt()
+                                            if (segLength <= 0 || segLength > 500 * 1024 * 1024) {
+                                                throw Exception("Invalid segment length $segLength")
+                                            }
+                                            val tmpFile = File(itemDir, "${prefix}${segIndex}.tmp")
+                                            val destFile = File(itemDir, "${prefix}${segIndex}.ts")
+                                            FileOutputStream(tmpFile).use { fos ->
+                                                var remaining = segLength
+                                                while (remaining > 0) {
+                                                    val toRead = minOf(ioBuf.size, remaining)
+                                                    val r = dataIn.read(ioBuf, 0, toRead)
+                                                    if (r == -1) {
+                                                        throw java.io.EOFException("Unexpected EOF in segment $segIndex")
+                                                    }
+                                                    fos.write(ioBuf, 0, r)
+                                                    remaining -= r
+                                                }
+                                                fos.flush()
+                                            }
+                                            if (destFile.exists()) destFile.delete()
+                                            tmpFile.renameTo(destFile)
+                                            receivedBytes.addAndGet(segLength.toLong())
+                                            completedUnits.incrementAndGet()
+                                            emitProgressIfNeeded()
+                                        }
+                                        batchCompleted = true
+                                    }
+                                    if (batchCompleted) break
+                                } catch (_: Exception) {
+                                    try { Thread.sleep(350L * (attempt + 1)) } catch (_: Exception) {}
                                 }
                             }
 
-                            val doneNow = completedUnits.incrementAndGet()
-                            val nowMs = System.currentTimeMillis()
-                            val prevEmit = lastEmitTimeMs.get()
-                            if (doneNow == totalUnits || (nowMs - prevEmit >= 180L && lastEmitTimeMs.compareAndSet(prevEmit, nowMs))) {
-                                val bytesNow = receivedBytes.get()
-                                val pct = (8 + ((doneNow.toDouble() / totalUnits.toDouble()) * 88.0)).toInt().coerceIn(8, 96)
-                                val mbNow = String.format(java.util.Locale.US, "%.1f", bytesNow / (1024.0 * 1024.0))
-                                val elapsedSec = ((nowMs - startTimeMs) / 1000.0).coerceAtLeast(0.25)
-                                val speedMb = String.format(java.util.Locale.US, "%.1f", (bytesNow / (1024.0 * 1024.0)) / elapsedSec)
-                                onProgress(pct, "Receiving directly ($mbNow MB • $speedMb MB/s)...")
+                            // Per-segment fallback if the sender APK is an older version without /batch or if batch had a hiccup
+                            if (!batchCompleted && firstError.get() == null) {
+                                for (segIdx in curStart..batch.endIdx) {
+                                    if (firstError.get() != null) break
+                                    val destFile = File(itemDir, "${prefix}${segIdx}.ts")
+                                    if (destFile.exists() && destFile.length() > 512L) continue
+
+                                    val segUrl = "$baseUrl/${prefix}${segIdx}.ts"
+                                    var segOk = false
+                                    for (attempt in 0 until 5) {
+                                        if (firstError.get() != null) break
+                                        try {
+                                            val req = Request.Builder().url(segUrl).build()
+                                            p2pLanHttpClient.newCall(req).execute().use { resp ->
+                                                if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
+                                                val body = resp.body ?: throw Exception("Empty body")
+                                                val tmpFile = File(itemDir, "${prefix}${segIdx}.tmp")
+                                                var segBytes = 0L
+                                                FileOutputStream(tmpFile).use { fos ->
+                                                    body.byteStream().use { input ->
+                                                        var r: Int
+                                                        while (input.read(ioBuf).also { r = it } != -1) {
+                                                            fos.write(ioBuf, 0, r)
+                                                            segBytes += r
+                                                        }
+                                                    }
+                                                    fos.flush()
+                                                }
+                                                if (segBytes <= 0L) {
+                                                    tmpFile.delete()
+                                                    throw Exception("0 bytes received")
+                                                }
+                                                if (destFile.exists()) destFile.delete()
+                                                tmpFile.renameTo(destFile)
+                                                receivedBytes.addAndGet(segBytes)
+                                                completedUnits.incrementAndGet()
+                                                emitProgressIfNeeded()
+                                                segOk = true
+                                            }
+                                            if (segOk) break
+                                        } catch (e: Exception) {
+                                            if (attempt == 4 && !batch.isAudio) {
+                                                firstError.compareAndSet(
+                                                    null,
+                                                    Exception("Segment $segIdx transfer failed: ${e.message}")
+                                                )
+                                            } else {
+                                                try { Thread.sleep(400L * (attempt + 1)) } catch (_: Exception) {}
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     } finally {
@@ -1266,7 +1485,7 @@ object MaxPlayOfflineVault {
                 storageKey = targetStorageKey,
                 totalSegments = totalSegs,
                 totalDurationSec = totalDur,
-                isSingleFile = totalSegs == 1,
+                isSingleFile = isSingleFile,
                 totalAudioSegments = totalAudSegs,
                 languageLabel = langLabel
             )

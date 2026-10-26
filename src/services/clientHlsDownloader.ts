@@ -34,7 +34,7 @@ function openChunkDb(): Promise<IDBDatabase> {
   });
 }
 
-async function putChunk(key: string, data: ArrayBuffer | number): Promise<void> {
+async function putChunk(key: string, data: ArrayBuffer | number | string): Promise<void> {
   const db = await openChunkDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite');

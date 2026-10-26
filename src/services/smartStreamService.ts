@@ -1198,9 +1198,9 @@ export class SmartStreamService {
       };
     }
 
-    // If user explicitly picked a quality (e.g. 480p or 720p) and it exists in cleanLinks
+    // If user explicitly picked a quality (e.g. 480p or 720p or 1080p)
     if (requestedQuality && requestedQuality.toLowerCase() !== "auto") {
-      const reqLower = requestedQuality.toLowerCase().trim();
+      const reqLower = requestedQuality.toLowerCase().trim().replace(/\s*\[(s1|s2)\]/i, "");
       const exactKey = availableQualities.find(
         (q) => q.toLowerCase() === reqLower || q.toLowerCase() === `${reqLower}p`
       );
@@ -1213,6 +1213,34 @@ export class SmartStreamService {
           availableQualities,
           cleanQualityLinks: cleanLinks,
         };
+      }
+
+      // If exact quality key is not in cleanLinks (e.g. user was on 480p and switched to a server with 720p/1080p master link),
+      // pick the closest numeric resolution link so playback switches seamlessly while keeping HLS level targeting intact!
+      const reqNum = parseInt(reqLower.replace(/\D/g, ""), 10);
+      if (!isNaN(reqNum) && reqNum > 0) {
+        let closestKey = availableQualities[0];
+        let bestDiff = Infinity;
+        for (const k of availableQualities) {
+          const kNum = parseInt(k.replace(/\D/g, ""), 10);
+          if (!isNaN(kNum) && kNum > 0) {
+            const diff = Math.abs(kNum - reqNum);
+            if (diff < bestDiff) {
+              bestDiff = diff;
+              closestKey = k;
+            }
+          }
+        }
+        if (closestKey && cleanLinks[closestKey]) {
+          return {
+            url: cleanLinks[closestKey],
+            quality: reqLower,
+            chosenUrl: cleanLinks[closestKey],
+            chosenQuality: reqLower,
+            availableQualities,
+            cleanQualityLinks: cleanLinks,
+          };
+        }
       }
     }
 
