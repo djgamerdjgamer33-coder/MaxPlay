@@ -9,8 +9,12 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
@@ -1133,10 +1137,10 @@ class MainActivity : AppCompatActivity() {
                         ): Boolean {
                             val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
                             val tempWebView = WebView(this@MainActivity)
-                            tempWebView.webViewClient = object : WebViewClient() {
+                            tempWebView.webViewClient = object : android.webkit.WebViewClient() {
                                 override fun shouldOverrideUrlLoading(
                                     v: WebView?,
-                                    request: WebResourceRequest?
+                                    request: android.webkit.WebResourceRequest?
                                 ): Boolean {
                                     val targetUrl = request?.url?.toString()
                                     if (!targetUrl.isNullOrBlank()) {
@@ -1332,8 +1336,8 @@ class MainActivity : AppCompatActivity() {
 
                         override fun onReceivedHttpError(
                             view: WebView?,
-                            request: WebResourceRequest?,
-                            errorResponse: WebResourceResponse?
+                            request: android.webkit.WebResourceRequest?,
+                            errorResponse: android.webkit.WebResourceResponse?
                         ) {
                             if (request?.isForMainFrame == true && (errorResponse?.statusCode ?: 200) >= 400) {
                                 tryNextMirrorOrFallback(view, request.url?.toString())
