@@ -341,8 +341,71 @@ class DownloadManagerService {
     const firstUrl = preferSecondary && task.secondaryVideoUrl ? task.secondaryVideoUrl : task.videoUrl;
     const secondUrl = preferSecondary && task.secondaryVideoUrl ? task.videoUrl : task.secondaryVideoUrl;
 
+    const doesStreamSupportRequestedLang = async (
+      rawSourceUrl: string | undefined,
+      resolvedM3u8Url: string,
+      targetLang: string | undefined
+    ): Promise<boolean> => {
+      const cleanLang = (targetLang || '').trim();
+      if (!cleanLang || cleanLang.toLowerCase() === 'default' || cleanLang.toLowerCase() === 'auto') {
+        return true;
+      }
+      try {
+        if (rawSourceUrl) {
+          const meta = SmartStreamService.getCachedStreamMeta(rawSourceUrl);
+          if (meta && Array.isArray(meta.audioTracks) && meta.audioTracks.length > 0) {
+            return meta.audioTracks.some((t) =>
+              ClientHlsDownloader.matchesTargetLanguage({ name: t, language: t, friendly: t }, cleanLang)
+            );
+          }
+        }
+        if (
+          resolvedM3u8Url &&
+          (resolvedM3u8Url.includes('.m3u8') ||
+            resolvedM3u8Url.includes('m3u8') ||
+            resolvedM3u8Url.includes('master.txt'))
+        ) {
+          const probed = await ClientHlsDownloader.probeMasterPlaylist(resolvedM3u8Url);
+          if (probed && Array.isArray(probed.audioTracks) && probed.audioTracks.length > 0) {
+            return probed.audioTracks.some((t: any) => {
+              const label = typeof t === 'string' ? t : t?.label || t?.name || t?.language || '';
+              return ClientHlsDownloader.matchesTargetLanguage(
+                { name: label, language: t?.language || label, friendly: label },
+                cleanLang
+              );
+            });
+          }
+        }
+      } catch {}
+      return true;
+    };
+
     const primaryResolved = await tryResolveUrl(firstUrl);
-    if (primaryResolved) return primaryResolved;
+    if (primaryResolved) {
+      // If a backup server URL exists and a specific language was requested (e.g. Tamil on Server 2),
+      // verify that the primary stream actually contains that language track; otherwise auto-switch to backup server!
+      if (secondUrl && secondUrl !== firstUrl && task.language) {
+        const hasLangOnPrimary = await doesStreamSupportRequestedLang(
+          firstUrl,
+          primaryResolved.streamUrl,
+          task.language
+        );
+        if (!hasLangOnPrimary) {
+          const secondaryResolved = await tryResolveUrl(secondUrl);
+          if (secondaryResolved) {
+            const hasLangOnSecondary = await doesStreamSupportRequestedLang(
+              secondUrl,
+              secondaryResolved.streamUrl,
+              task.language
+            );
+            if (hasLangOnSecondary) {
+              return secondaryResolved;
+            }
+          }
+        }
+      }
+      return primaryResolved;
+    }
 
     if (secondUrl && secondUrl !== firstUrl) {
       const secondaryResolved = await tryResolveUrl(secondUrl);

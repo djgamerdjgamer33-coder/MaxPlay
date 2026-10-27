@@ -474,22 +474,47 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
       setSelectedSendFileId(file.id);
       const code = String(Math.floor(100000 + Math.random() * 900000));
 
-      // Resolve catalog source URLs so receiver can also use universal relay fallback if on different networks
+      // Resolve catalog source URLs (including qualityLinks & Server 2) so universal fallback also has the exact quality link
       let resolvedVideoUrl = file.videoUrl || '';
-      let resolvedSecondaryUrl = '';
+      let resolvedSecondaryUrl = (file as any).secondaryVideoUrl || '';
+      const targetQ = (file.quality || '720p').toLowerCase();
       if (file.contentId) {
         const catItem = contentList.find((c) => c.id === file.contentId);
         if (catItem) {
-          if (file.episodeIndex !== undefined && catItem.seasons) {
+          const pickFromQualityDict = (dict?: Record<string, string>) => {
+            if (!dict || typeof dict !== 'object') return '';
+            for (const [k, v] of Object.entries(dict)) {
+              if (k.toLowerCase() === targetQ && typeof v === 'string' && v.trim()) return v.trim();
+            }
+            const first = Object.values(dict).find((v) => typeof v === 'string' && v.trim());
+            return first ? first.trim() : '';
+          };
+
+          const seasonsArr = (catItem as any).seasonsData || (catItem as any).seasons;
+          if (file.episodeIndex !== undefined && (Array.isArray(seasonsArr) || Array.isArray((catItem as any).episodesList))) {
             const sIdx = file.seasonIndex || 0;
-            const ep = catItem.seasons[sIdx]?.episodes?.[file.episodeIndex];
+            const ep =
+              (Array.isArray(seasonsArr) && seasonsArr[sIdx]?.episodes?.[file.episodeIndex]) ||
+              (Array.isArray((catItem as any).episodesList) && (catItem as any).episodesList[file.episodeIndex]);
             if (ep) {
-              resolvedVideoUrl = ep.videoUrl || resolvedVideoUrl;
-              resolvedSecondaryUrl = (ep as any).secondaryVideoUrl || '';
+              resolvedVideoUrl =
+                pickFromQualityDict(ep.qualityLinks) ||
+                ep.videoUrl ||
+                resolvedVideoUrl;
+              resolvedSecondaryUrl =
+                pickFromQualityDict((ep as any).secondaryServerQualityLinks || (ep as any).secondaryQualityLinks) ||
+                (ep as any).secondaryVideoUrl ||
+                resolvedSecondaryUrl;
             }
           } else {
-            resolvedVideoUrl = catItem.videoUrl || resolvedVideoUrl;
-            resolvedSecondaryUrl = (catItem as any).secondaryVideoUrl || '';
+            resolvedVideoUrl =
+              pickFromQualityDict(catItem.qualityLinks) ||
+              catItem.videoUrl ||
+              resolvedVideoUrl;
+            resolvedSecondaryUrl =
+              pickFromQualityDict((catItem as any).secondaryServerQualityLinks || catItem.secondaryQualityLinks) ||
+              (catItem as any).secondaryVideoUrl ||
+              resolvedSecondaryUrl;
           }
         }
       }
@@ -640,15 +665,11 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
         }
       };
 
-      // Path 1: High-Speed Continuous Batch Phone-to-Phone LAN P2P Stream (Zero Mobile Data!)
-      if (
-        NativeBridgeService.isRunningInKotlinApp() &&
-        session.senderIp &&
-        session.senderIp !== '127.0.0.1'
-      ) {
+      // Path 1: High-Speed Continuous Batch Phone-to-Phone LAN/Hotspot P2P Stream (Zero Mobile Data!)
+      if (NativeBridgeService.isRunningInKotlinApp()) {
         for (let lanAttempt = 0; lanAttempt < 3 && !transferredOk; lanAttempt++) {
           const p2pRes = await NativeBridgeService.receiveDirectTransferFromPeerNative(
-            session.senderIp,
+            session.senderIp || '192.168.43.1',
             session.senderPort || 48821,
             cleanCode,
             targetStorageKey,

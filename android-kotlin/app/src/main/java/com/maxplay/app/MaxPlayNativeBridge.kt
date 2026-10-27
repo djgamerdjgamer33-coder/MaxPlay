@@ -1094,6 +1094,35 @@ class MaxPlayNativeBridge(
         return activity.isNativePopunderAdOpen()
     }
 
+    @JavascriptInterface
+    fun shareContent(title: String, text: String, url: String): Boolean {
+        return try {
+            activity.runOnUiThread {
+                try {
+                    val cleanTitle = title.ifBlank { "MaxPlay" }
+                    val cleanUrl = url.trim()
+                    val fullMessage = if (cleanUrl.isNotEmpty() && !text.contains(cleanUrl)) {
+                        "${text.trim()}\n$cleanUrl"
+                    } else {
+                        text.trim()
+                    }
+                    val sendIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(android.content.Intent.EXTRA_SUBJECT, cleanTitle)
+                        putExtra(android.content.Intent.EXTRA_TITLE, cleanTitle)
+                        putExtra(android.content.Intent.EXTRA_TEXT, fullMessage)
+                    }
+                    val chooser = android.content.Intent.createChooser(sendIntent, "Share $cleanTitle via")
+                    chooser.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(chooser)
+                } catch (_: Exception) {}
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun parseHeadersJson(headersJson: String?): Map<String, String> {
         if (headersJson.isNullOrBlank()) return emptyMap()
         val map = mutableMapOf<String, String>()

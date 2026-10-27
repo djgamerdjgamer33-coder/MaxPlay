@@ -510,11 +510,12 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
     const existingS2Dl = isSeries
       ? (activeEp as any)?.secondaryDownloadQualities || epPart0?.secondaryDownloadQualities
       : (content as any)?.secondaryDownloadQualities || contentPart0?.secondaryDownloadQualities;
-    const existingAudios =
-      (activeEp as any)?.audioTracks ||
-      epPart0?.audioTracks ||
-      (content as any)?.audioTracks ||
-      contentPart0?.audioTracks;
+    const existingS1Audios = isSeries
+      ? (activeEp as any)?.audioTracks || epPart0?.audioTracks
+      : (content as any)?.audioTracks || contentPart0?.audioTracks;
+    const existingS2Audios = isSeries
+      ? (activeEp as any)?.secondaryAudioTracks || epPart0?.secondaryAudioTracks
+      : (content as any)?.secondaryAudioTracks || contentPart0?.secondaryAudioTracks;
 
     const hasVerifiedS1 = Array.isArray(existingS1Dl) && existingS1Dl.length > 0;
     const hasVerifiedS2 = Array.isArray(existingS2Dl) && existingS2Dl.length > 0;
@@ -522,7 +523,7 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
     if (hasVerifiedS1) {
       setServer1Meta({
         downloadQualities: existingS1Dl,
-        audioTracks: Array.isArray(existingAudios) ? existingAudios : undefined,
+        audioTracks: Array.isArray(existingS1Audios) ? existingS1Audios : undefined,
         duration: requestedDur,
         isLiveProbed: true,
       });
@@ -530,33 +531,66 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
     if (hasVerifiedS2) {
       setServer2Meta({
         downloadQualities: existingS2Dl,
-        audioTracks: Array.isArray(existingAudios) ? existingAudios : undefined,
+        audioTracks: Array.isArray(existingS2Audios) ? existingS2Audios : undefined,
         duration: requestedDur,
         isLiveProbed: true,
       });
     }
 
-    // If Admin already verified qualities, skip slow live network probing!
-    if ((modalServer === 'server1' && hasVerifiedS1) || (modalServer === 'server2' && hasVerifiedS2)) {
+    // Proactively probe BOTH Server 1 and Server 2 in parallel so exact per-server audio tracks (e.g. Tamil on S2)
+    // and cross-server qualities are known immediately!
+    const needS1Probe = Boolean(primaryUrl && (!hasVerifiedS1 || !Array.isArray(existingS1Audios) || existingS1Audios.length === 0));
+    const needS2Probe = Boolean(secondaryUrl && (!hasVerifiedS2 || !Array.isArray(existingS2Audios) || existingS2Audios.length === 0));
+
+    if (!needS1Probe && !needS2Probe) {
       setIsProbing(false);
       return;
     }
 
     const deferTimer = setTimeout(async () => {
       if (isCancelled) return;
-      setIsProbing(true);
+      if ((modalServer === 'server1' && !hasVerifiedS1) || (modalServer === 'server2' && !hasVerifiedS2)) {
+        setIsProbing(true);
+      }
       try {
-        if (modalServer === 'server2' && secondaryUrl && !hasVerifiedS2) {
-          const s2 = await probeSingleServerUrl(secondaryUrl, requestedDur);
-          if (!isCancelled && s2) setServer2Meta(s2);
-        } else if (modalServer === 'server1' && primaryUrl && !hasVerifiedS1) {
-          const s1 = await probeSingleServerUrl(primaryUrl, requestedDur);
-          if (!isCancelled && s1) setServer1Meta(s1);
-        }
+        await Promise.all([
+          needS1Probe
+            ? probeSingleServerUrl(primaryUrl, requestedDur).then((s1) => {
+                if (!isCancelled && s1) {
+                  setServer1Meta((prev) => ({
+                    downloadQualities:
+                      prev?.downloadQualities && prev.downloadQualities.length > 0
+                        ? prev.downloadQualities
+                        : s1.downloadQualities,
+                    audioTracks:
+                      s1.audioTracks && s1.audioTracks.length > 0 ? s1.audioTracks : prev?.audioTracks,
+                    duration: s1.duration || prev?.duration || requestedDur,
+                    isLiveProbed: true,
+                  }));
+                }
+              })
+            : Promise.resolve(),
+          needS2Probe
+            ? probeSingleServerUrl(secondaryUrl, requestedDur).then((s2) => {
+                if (!isCancelled && s2) {
+                  setServer2Meta((prev) => ({
+                    downloadQualities:
+                      prev?.downloadQualities && prev.downloadQualities.length > 0
+                        ? prev.downloadQualities
+                        : s2.downloadQualities,
+                    audioTracks:
+                      s2.audioTracks && s2.audioTracks.length > 0 ? s2.audioTracks : prev?.audioTracks,
+                    duration: s2.duration || prev?.duration || requestedDur,
+                    isLiveProbed: true,
+                  }));
+                }
+              })
+            : Promise.resolve(),
+        ]);
       } finally {
         if (!isCancelled) setIsProbing(false);
       }
-    }, 60);
+    }, 50);
 
     return () => {
       isCancelled = true;
@@ -862,9 +896,21 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
       const s1Opts = toOptions(s1Map, 'server1');
       const s2Opts = toOptions(s2Map, 'server2');
 
+      // Merge any qualities that exist on the other server (e.g. 1080p on Server 2 when Server 1 only has 720p/480p)
+      // so the user can select any available quality regardless of which server tab is active!
+      const primaryOpts = isServer2 ? s2Opts : s1Opts;
+      const otherOpts = isServer2 ? s1Opts : s2Opts;
+      const mergedMovieOpts = [...primaryOpts];
+      for (const o of otherOpts) {
+        if (!mergedMovieOpts.some((p) => p.id.toLowerCase() === o.id.toLowerCase())) {
+          mergedMovieOpts.push(o);
+        }
+      }
+      mergedMovieOpts.sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
+
       return {
-        qualityOptions: isServer2 ? s2Opts : s1Opts,
-        crossServerQualityOptions: isServer2 ? s1Opts : s2Opts,
+        qualityOptions: mergedMovieOpts,
+        crossServerQualityOptions: otherOpts,
         seriesGlobalQualities: [] as string[],
       };
     }
@@ -995,6 +1041,125 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
    *   Automatically selects the best available fallback quality (e.g. `720p` or `480p`), marks `isFallbackQuality = true`
    *   so the Confirmation Screen highlights it in RED with an inline "Unselect" button!
    */
+  /**
+   * Helper: Determines whether a given server (`server1` or `server2`) supports `targetLang` for `ep` (or Movie if `ep` is null).
+   * Used so that if the user has Server 1 selected (which only has Hindi, English, Japanese) and chooses Tamil (which is on Server 2),
+   * the download engine automatically switches to Server 2's quality link to download Tamil!
+   */
+  const getServerLanguageSupport = (
+    ep: any | null,
+    targetLang: string
+  ): { s1HasLang: boolean; s2HasLang: boolean; shouldPreferOtherServer: (primarySrv: 'server1' | 'server2') => boolean } => {
+    const cleanTarget = (targetLang || '').trim();
+    const s1Langs: string[] = [];
+    const s2Langs: string[] = [];
+
+    const addNorm = (arr: string[], raw?: any) => {
+      if (!raw) return;
+      const str = typeof raw === 'string' ? raw : raw?.name || raw?.label || raw?.lang || '';
+      if (!str || typeof str !== 'string') return;
+      for (const part of str.split(/[,/|•+]+/).map((s) => s.trim()).filter(Boolean)) {
+        if (isQualityKey(part)) continue;
+        const norm = ClientHlsDownloader.normalizeLanguageLabel(part, part) || part;
+        if (!norm || norm === 'Default' || norm === 'Default Audio' || norm.toLowerCase() === 'unknown' || isQualityKey(norm)) continue;
+        if (!arr.some((x) => x.toLowerCase() === norm.toLowerCase())) {
+          arr.push(norm);
+        }
+      }
+    };
+
+    const urls = extractUrlsFromItem(ep, !ep);
+    const epPart0 =
+      ep && Array.isArray(ep?.videoLinks) && ep.videoLinks.length > 0 && typeof ep.videoLinks[0] === 'object'
+        ? ep.videoLinks[0]
+        : null;
+    const contentPart0 =
+      Array.isArray((content as any)?.videoLinks) && (content as any).videoLinks.length > 0 && typeof (content as any).videoLinks[0] === 'object'
+        ? (content as any).videoLinks[0]
+        : null;
+
+    // 1. Server 1 known audio tracks
+    if (Array.isArray(server1Meta?.audioTracks)) {
+      server1Meta!.audioTracks!.forEach((l) => addNorm(s1Langs, l));
+    }
+    if (urls.primaryUrl) {
+      const c1 = SmartStreamService.getCachedStreamMeta(urls.primaryUrl);
+      if (c1 && Array.isArray(c1.audioTracks)) c1.audioTracks.forEach((l) => addNorm(s1Langs, l));
+    }
+    if (s1Langs.length === 0) {
+      const savedS1 = ep
+        ? (ep as any)?.audioTracks || epPart0?.audioTracks
+        : (content as any)?.audioTracks || contentPart0?.audioTracks;
+      if (Array.isArray(savedS1)) savedS1.forEach((l: any) => addNorm(s1Langs, l));
+    }
+    const vSources1 = ep ? ep?.videoSources : content?.videoSources;
+    if (vSources1 && typeof vSources1 === 'object') {
+      Object.keys(vSources1).forEach((k) => addNorm(s1Langs, k));
+    }
+
+    // 2. Server 2 known audio tracks
+    if (Array.isArray(server2Meta?.audioTracks)) {
+      server2Meta!.audioTracks!.forEach((l) => addNorm(s2Langs, l));
+    }
+    if (urls.secondaryUrl) {
+      const c2 = SmartStreamService.getCachedStreamMeta(urls.secondaryUrl);
+      if (c2 && Array.isArray(c2.audioTracks)) c2.audioTracks.forEach((l) => addNorm(s2Langs, l));
+    }
+    if (s2Langs.length === 0) {
+      const savedS2 = ep
+        ? (ep as any)?.secondaryAudioTracks || epPart0?.secondaryAudioTracks
+        : (content as any)?.secondaryAudioTracks || contentPart0?.secondaryAudioTracks;
+      if (Array.isArray(savedS2)) savedS2.forEach((l: any) => addNorm(s2Langs, l));
+    }
+    const vSources2 = ep ? (ep as any)?.secondaryVideoSources : (content as any)?.secondaryVideoSources;
+    if (vSources2 && typeof vSources2 === 'object') {
+      Object.keys(vSources2).forEach((k) => addNorm(s2Langs, k));
+    }
+
+    // Cross-server attribution when one server's tracks are known and extra languages exist in availableLanguages
+    if (s1Langs.length > 0 && s2Langs.length === 0) {
+      availableLanguages.forEach((al) => {
+        if (!s1Langs.some((s1) => s1.toLowerCase() === al.toLowerCase())) {
+          addNorm(s2Langs, al);
+        }
+      });
+    } else if (s2Langs.length > 0 && s1Langs.length === 0) {
+      availableLanguages.forEach((al) => {
+        if (!s2Langs.some((s2) => s2.toLowerCase() === al.toLowerCase())) {
+          addNorm(s1Langs, al);
+        }
+      });
+    }
+
+    const matchesList = (list: string[]) =>
+      list.some(
+        (item) =>
+          item.toLowerCase() === cleanTarget.toLowerCase() ||
+          ClientHlsDownloader.matchesTargetLanguage({ name: item, language: item, friendly: item }, cleanTarget)
+      );
+
+    const inS1 = matchesList(s1Langs);
+    const inS2 = matchesList(s2Langs);
+
+    return {
+      s1HasLang: inS1 || s1Langs.length === 0,
+      s2HasLang: inS2 || s2Langs.length === 0,
+      shouldPreferOtherServer: (primarySrv: 'server1' | 'server2') => {
+        if (!cleanTarget) return false;
+        if (primarySrv === 'server1') {
+          // User has Server 1 selected, but selected language (e.g. Tamil) is NOT in Server 1 and IS in Server 2 (or Server 1 is known to lack it)
+          return (!inS1 && s1Langs.length > 0 && (inS2 || s2Langs.length === 0)) || (!inS1 && inS2);
+        } else {
+          // User has Server 2 selected, but selected language is NOT in Server 2 and IS in Server 1
+          return (!inS2 && s2Langs.length > 0 && (inS1 || s1Langs.length === 0)) || (!inS2 && inS1);
+        }
+      },
+    };
+  };
+
+  /**
+   * 4. SMART PER-EPISODE RESOLUTION ENGINE (Scenarios A, B, and C + Cross-Server Language Auto-Switch):
+   */
   const episodeResolutionPlans = useMemo<EpisodeResolvedPlan[]>(() => {
     if (!isSeries) return [];
     const primarySrv: 'server1' | 'server2' = modalServer;
@@ -1012,10 +1177,16 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
       const s2Map = getItemServerQualityMap(ep, 'server2', isFocused ? server2Meta : null);
       const epUrls = extractUrlsFromItem(ep, false);
 
-      const primaryMap = primarySrv === 'server1' ? s1Map : s2Map;
-      const otherMap = otherSrv === 'server1' ? s1Map : s2Map;
-      const primarySingleUrl = primarySrv === 'server1' ? epUrls.primaryUrl : epUrls.secondaryUrl;
-      const otherSingleUrl = otherSrv === 'server1' ? epUrls.primaryUrl : epUrls.secondaryUrl;
+      const langSupport = getServerLanguageSupport(ep, selectedLanguage);
+      const forceOtherForLang = langSupport.shouldPreferOtherServer(primarySrv);
+
+      const effectiveFirstSrv: 'server1' | 'server2' = forceOtherForLang ? otherSrv : primarySrv;
+      const effectiveSecondSrv: 'server1' | 'server2' = forceOtherForLang ? primarySrv : otherSrv;
+
+      const firstMap = effectiveFirstSrv === 'server1' ? s1Map : s2Map;
+      const secondMap = effectiveSecondSrv === 'server1' ? s1Map : s2Map;
+      const firstSingleUrl = effectiveFirstSrv === 'server1' ? epUrls.primaryUrl : epUrls.secondaryUrl;
+      const secondSingleUrl = effectiveSecondSrv === 'server1' ? epUrls.primaryUrl : epUrls.secondaryUrl;
 
       const findExactInMap = (
         m: Map<string, { id: string; url: string; sizeMb: number; bandwidth: number; label: string; badge: string }>,
@@ -1040,64 +1211,64 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
         return lowerList[0] || list[0];
       };
 
-      // Case 1: Exact match on user's selected server
-      const exactPrimary = findExactInMap(primaryMap, targetQ);
-      if (exactPrimary) {
-        const exactBackup = findExactInMap(otherMap, targetQ) || pickBestFallbackFromMap(otherMap);
+      // Case 1: Exact quality match on the effective preferred server (either user's server, or auto-switched server for language!)
+      const exactFirst = findExactInMap(firstMap, targetQ);
+      if (exactFirst) {
+        const exactBackup = findExactInMap(secondMap, targetQ) || pickBestFallbackFromMap(secondMap);
+        const isAutoSwitched = effectiveFirstSrv !== primarySrv;
         return {
           epIndex: idx,
           epNumber: epNum,
           epTitle,
           epId,
           requestedQuality: targetQ,
-          resolvedQuality: exactPrimary.id,
-          resolvedServer: primarySrv,
+          resolvedQuality: exactFirst.id,
+          resolvedServer: effectiveFirstSrv,
           language: selectedLanguage,
-          targetUrl: exactPrimary.url,
+          targetUrl: exactFirst.url,
           backupUrl:
-            exactBackup?.url && exactBackup.url !== exactPrimary.url ? exactBackup.url : undefined,
-          sizeMb: exactPrimary.sizeMb,
-          status: 'exact',
+            exactBackup?.url && exactBackup.url !== exactFirst.url ? exactBackup.url : undefined,
+          sizeMb: exactFirst.sizeMb,
+          status: isAutoSwitched ? 'cross_server_exact' : 'exact',
           isFallbackQuality: false,
-          isCrossServerAuto: false,
+          isCrossServerAuto: isAutoSwitched,
         };
       }
 
-      // Case 2: Exact match is NOT on selected server, but IS available on the other server!
-      const exactOther = findExactInMap(otherMap, targetQ);
-      if (exactOther) {
-        const fallbackPrimary = pickBestFallbackFromMap(primaryMap);
+      // Case 2: Exact quality match is on the second server
+      const exactSecond = findExactInMap(secondMap, targetQ);
+      if (exactSecond) {
+        const fallbackFirst = pickBestFallbackFromMap(firstMap);
+        const isAutoSwitched = effectiveSecondSrv !== primarySrv;
         return {
           epIndex: idx,
           epNumber: epNum,
           epTitle,
           epId,
           requestedQuality: targetQ,
-          resolvedQuality: exactOther.id,
-          resolvedServer: otherSrv,
+          resolvedQuality: exactSecond.id,
+          resolvedServer: effectiveSecondSrv,
           language: selectedLanguage,
-          targetUrl: exactOther.url,
+          targetUrl: exactSecond.url,
           backupUrl:
-            fallbackPrimary?.url && fallbackPrimary.url !== exactOther.url
-              ? fallbackPrimary.url
+            fallbackFirst?.url && fallbackFirst.url !== exactSecond.url
+              ? fallbackFirst.url
               : undefined,
-          sizeMb: exactOther.sizeMb,
-          status: 'cross_server_exact',
+          sizeMb: exactSecond.sizeMb,
+          status: isAutoSwitched ? 'cross_server_exact' : 'exact',
           isFallbackQuality: false,
-          isCrossServerAuto: true,
+          isCrossServerAuto: isAutoSwitched,
         };
       }
 
       // Case 3: Neither Server 1 nor Server 2 has `targetQ` in explicit quality maps.
-      // Check if either server has lower/other explicit qualities (Fallback Quality Scenario)
-      const fallbackPrimary = pickBestFallbackFromMap(primaryMap);
-      const fallbackOther = pickBestFallbackFromMap(otherMap);
+      const fallbackFirst = pickBestFallbackFromMap(firstMap);
+      const fallbackSecond = pickBestFallbackFromMap(secondMap);
 
-      if (fallbackPrimary || fallbackOther) {
-        // Choose primary server's best fallback if available, otherwise other server's best fallback
-        const chosen = fallbackPrimary || fallbackOther!;
-        const chosenServer: 'server1' | 'server2' = fallbackPrimary ? primarySrv : otherSrv;
-        const backupCandidate = fallbackPrimary ? fallbackOther : fallbackPrimary;
+      if (fallbackFirst || fallbackSecond) {
+        const chosen = fallbackFirst || fallbackSecond!;
+        const chosenServer: 'server1' | 'server2' = fallbackFirst ? effectiveFirstSrv : effectiveSecondSrv;
+        const backupCandidate = fallbackFirst ? fallbackSecond : fallbackFirst;
 
         return {
           epIndex: idx,
@@ -1121,11 +1292,12 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
       }
 
       // Case 4: Legacy single-URL episode (no explicit qualityLinks map configured)
-      if (primarySingleUrl || otherSingleUrl) {
-        const usePrimary = Boolean(primarySingleUrl);
-        const resolvedSrv = usePrimary ? primarySrv : otherSrv;
-        const tUrl = usePrimary ? primarySingleUrl : otherSingleUrl;
-        const bUrl = usePrimary ? otherSingleUrl : primarySingleUrl;
+      if (firstSingleUrl || secondSingleUrl) {
+        const useFirst = Boolean(firstSingleUrl);
+        const resolvedSrv = useFirst ? effectiveFirstSrv : effectiveSecondSrv;
+        const tUrl = useFirst ? firstSingleUrl : secondSingleUrl;
+        const bUrl = useFirst ? secondSingleUrl : firstSingleUrl;
+        const isAutoSwitched = resolvedSrv !== primarySrv;
         return {
           epIndex: idx,
           epNumber: epNum,
@@ -1138,9 +1310,9 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
           targetUrl: tUrl,
           backupUrl: bUrl && bUrl !== tUrl ? bUrl : undefined,
           sizeMb: 0,
-          status: usePrimary ? 'exact' : 'cross_server_exact',
+          status: isAutoSwitched ? 'cross_server_exact' : 'exact',
           isFallbackQuality: false,
-          isCrossServerAuto: !usePrimary,
+          isCrossServerAuto: isAutoSwitched,
         };
       }
 
@@ -1169,6 +1341,7 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
     focusedEpisodeIdx,
     server1Meta,
     server2Meta,
+    availableLanguages,
   ]);
 
   // Toggle an episode in the vertical list (0ms instant, no network re-probing!)
@@ -1227,22 +1400,71 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
     return false;
   }, [content, currentEpisodes, primaryUrl, secondaryUrl]);
 
-  // Movie download URL resolver (Strictly for Movies)
-  const resolveMovieDownloadUrl = (
+  // Movie download URL resolver (with automatic cross-server quality & language routing!)
+  const resolveMoviePlan = (
     activeQuality: string,
-    targetServer: 'server1' | 'server2'
-  ): string => {
-    const isS2 = targetServer === 'server2';
-    const mMap = getItemServerQualityMap(null, targetServer, isS2 ? server2Meta : server1Meta);
-    for (const [k, v] of mMap.entries()) {
-      if (k.toLowerCase() === activeQuality.toLowerCase() && v.url) {
-        return v.url;
-      }
-    }
-    const firstEntry = Array.from(mMap.values())[0];
-    if (firstEntry?.url) return firstEntry.url;
+    userServer: 'server1' | 'server2',
+    targetLang: string
+  ): { targetVideoUrl: string; backupVideoUrl?: string; resolvedServer: 'server1' | 'server2' } => {
+    const otherServer: 'server1' | 'server2' = userServer === 'server1' ? 'server2' : 'server1';
+    const langSupport = getServerLanguageSupport(null, targetLang);
+    const preferOtherForLang = langSupport.shouldPreferOtherServer(userServer);
+
+    const firstServer: 'server1' | 'server2' = preferOtherForLang ? otherServer : userServer;
+    const secondServer: 'server1' | 'server2' = preferOtherForLang ? userServer : otherServer;
+
+    const firstMap = getItemServerQualityMap(null, firstServer, firstServer === 'server2' ? server2Meta : server1Meta);
+    const secondMap = getItemServerQualityMap(null, secondServer, secondServer === 'server2' ? server2Meta : server1Meta);
     const urls = extractUrlsFromItem(null, true);
-    return isS2 ? urls.secondaryUrl : urls.primaryUrl;
+    const firstSingle = firstServer === 'server2' ? urls.secondaryUrl : urls.primaryUrl;
+    const secondSingle = secondServer === 'server2' ? urls.secondaryUrl : urls.primaryUrl;
+
+    const findExact = (m: Map<string, { url: string }>, q: string) => {
+      for (const [k, v] of m.entries()) {
+        if (k.toLowerCase() === q.toLowerCase() && v.url) return v.url;
+      }
+      return '';
+    };
+
+    const exactFirst = findExact(firstMap, activeQuality);
+    const exactSecond = findExact(secondMap, activeQuality);
+
+    // 1. Preferred server (accounting for language) has the requested quality
+    if (exactFirst) {
+      const backup = exactSecond || Array.from(secondMap.values())[0]?.url || secondSingle;
+      return {
+        targetVideoUrl: exactFirst,
+        backupVideoUrl: backup && backup !== exactFirst ? backup : undefined,
+        resolvedServer: firstServer,
+      };
+    }
+
+    // 2. Second server has the requested quality (e.g. user selected 1080p which only exists on Server 2)
+    if (exactSecond) {
+      const backup = Array.from(firstMap.values())[0]?.url || firstSingle;
+      return {
+        targetVideoUrl: exactSecond,
+        backupVideoUrl: backup && backup !== exactSecond ? backup : undefined,
+        resolvedServer: secondServer,
+      };
+    }
+
+    // 3. Fallback to first available entry or single URL on preferred server
+    const fallbackFirst = Array.from(firstMap.values())[0]?.url || firstSingle;
+    const fallbackSecond = Array.from(secondMap.values())[0]?.url || secondSingle;
+    if (fallbackFirst) {
+      return {
+        targetVideoUrl: fallbackFirst,
+        backupVideoUrl: fallbackSecond && fallbackSecond !== fallbackFirst ? fallbackSecond : undefined,
+        resolvedServer: firstServer,
+      };
+    }
+
+    return {
+      targetVideoUrl: fallbackSecond || '',
+      backupVideoUrl: undefined,
+      resolvedServer: secondServer,
+    };
   };
 
   const activeQualityObj =
@@ -1290,11 +1512,10 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
       return;
     }
 
-    const backupServer: 'server1' | 'server2' = modalServer === 'server1' ? 'server2' : 'server1';
-
     if (isMovie) {
-      const targetVideoUrl = resolveMovieDownloadUrl(activeQualityId, modalServer);
-      const backupVideoUrl = resolveMovieDownloadUrl(activeQualityId, backupServer);
+      const moviePlan = resolveMoviePlan(activeQualityId, modalServer, selectedLanguage);
+      const targetVideoUrl = moviePlan.targetVideoUrl;
+      const backupVideoUrl = moviePlan.backupVideoUrl;
       if (!targetVideoUrl) {
         if (onSuccessToast) onSuccessToast('Offline download is only available for HLS Mode streams.');
         return;
@@ -1314,7 +1535,7 @@ export const DownloadSelectionModal: React.FC<DownloadSelectionModalProps> = ({
         videoUrl: targetVideoUrl,
         secondaryVideoUrl:
           backupVideoUrl && backupVideoUrl !== targetVideoUrl ? backupVideoUrl : undefined,
-        selectedServer: modalServer,
+        selectedServer: moviePlan.resolvedServer,
         estimatedBytes: estBytes,
       });
 

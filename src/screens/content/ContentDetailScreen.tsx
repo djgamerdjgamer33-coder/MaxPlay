@@ -1681,17 +1681,27 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
         : null;
 
     // --- 1. Server 1 Specific Languages ---
-    s1DiscoveredAudioTracks.forEach((l) => addLangTo(s1List, l));
+    const s1LiveTracks = [...s1DiscoveredAudioTracks];
     if (primaryServerUrl) {
       const cachedS1 = SmartStreamService.getCachedStreamMeta(primaryServerUrl);
       if (cachedS1 && Array.isArray(cachedS1.audioTracks)) {
-        cachedS1.audioTracks.forEach((l) => addLangTo(s1List, l));
+        cachedS1.audioTracks.forEach((l) => {
+          if (!s1LiveTracks.includes(l)) s1LiveTracks.push(l);
+        });
       }
     }
+    if (selectedServer === 'server1' && discoveredAudioTracks.length > 0) {
+      discoveredAudioTracks.forEach((l) => {
+        if (!s1LiveTracks.includes(l)) s1LiveTracks.push(l);
+      });
+    }
+    s1LiveTracks.forEach((l) => addLangTo(s1List, l));
+
     const s1VerifiedAudios = isSeries && !isMovie
       ? (currentEpisode as any)?.audioTracks || epPart0?.audioTracks
       : (activeMoviePart as any)?.audioTracks || contentPart0?.audioTracks || (content as any)?.audioTracks;
-    if (Array.isArray(s1VerifiedAudios)) {
+    // Only use saved s1VerifiedAudios for s1List if live HLS probing hasn't discovered tracks yet
+    if (s1List.length === 0 && Array.isArray(s1VerifiedAudios)) {
       s1VerifiedAudios.forEach((l) => addLangTo(s1List, l));
     }
     if (currentEpisode?.videoSources && typeof currentEpisode.videoSources === 'object') {
@@ -1705,32 +1715,40 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
     }
 
     // --- 2. Server 2 Specific Languages ---
-    s2DiscoveredAudioTracks.forEach((l) => addLangTo(s2List, l));
+    const s2LiveTracks = [...s2DiscoveredAudioTracks];
     if (secondaryServerUrl) {
       const cachedS2 = SmartStreamService.getCachedStreamMeta(secondaryServerUrl);
       if (cachedS2 && Array.isArray(cachedS2.audioTracks)) {
-        cachedS2.audioTracks.forEach((l) => addLangTo(s2List, l));
+        cachedS2.audioTracks.forEach((l) => {
+          if (!s2LiveTracks.includes(l)) s2LiveTracks.push(l);
+        });
       }
     }
+    if (selectedServer === 'server2' && discoveredAudioTracks.length > 0) {
+      discoveredAudioTracks.forEach((l) => {
+        if (!s2LiveTracks.includes(l)) s2LiveTracks.push(l);
+      });
+    }
+    s2LiveTracks.forEach((l) => addLangTo(s2List, l));
+
     const s2VerifiedAudios = isSeries && !isMovie
       ? (currentEpisode as any)?.secondaryAudioTracks || epPart0?.secondaryAudioTracks
       : (activeMoviePart as any)?.secondaryAudioTracks || contentPart0?.secondaryAudioTracks || (content as any)?.secondaryAudioTracks;
-    if (Array.isArray(s2VerifiedAudios)) {
+    if (s2List.length === 0 && Array.isArray(s2VerifiedAudios)) {
       s2VerifiedAudios.forEach((l) => addLangTo(s2List, l));
     }
     if (secondaryVideoSources && typeof secondaryVideoSources === 'object') {
       Object.keys(secondaryVideoSources).forEach((l) => addLangTo(s2List, l));
     }
 
-    // --- 3. Active Player Discovered Tracks ---
-    if (discoveredAudioTracks.length > 0) {
-      discoveredAudioTracks.forEach((l) =>
-        addLangTo(selectedServer === 'server2' ? s2List : s1List, l)
-      );
-    }
-
-    // --- 4. Content / Episode General Configured Languages (Always merged so BOTH Server 1 & Server 2 display ALL languages!) ---
+    // --- 3. Content / Episode General Configured Languages (Always merged so BOTH Server 1 & Server 2 display ALL languages!) ---
     const generalLangs: string[] = [];
+    if (Array.isArray(s1VerifiedAudios)) {
+      s1VerifiedAudios.forEach((l: any) => addLangTo(generalLangs, l));
+    }
+    if (Array.isArray(s2VerifiedAudios)) {
+      s2VerifiedAudios.forEach((l: any) => addLangTo(generalLangs, l));
+    }
     const partLangs =
       (activeMoviePart as any)?.languages ||
       (currentEpisode as any)?.languages ||
@@ -1755,8 +1773,8 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
     }
 
     // Smart Cross-Server Attribution:
-    // If Server 1 has known specific languages (e.g. Hindi, English) and generalLangs has an extra language (e.g. Japanese),
-    // attribute that extra language to Server 2 when Server 2 exists (and vice versa).
+    // If Server 1 has known specific languages (e.g. Hindi, English, Japanese) and generalLangs has extra languages (e.g. Telugu, Tamil),
+    // attribute those extra languages to Server 2 when Server 2 exists (and vice versa).
     const hasS1 = Boolean(primaryServerUrl);
     const hasS2 = Boolean(secondaryServerUrl || Object.keys(secondaryServerQualityLinks).length > 0);
     if (hasS1 && hasS2) {
@@ -1954,17 +1972,26 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
       } catch {}
     };
 
-    if (primaryServerUrl) {
-      probeUrlForServer(primaryServerUrl, 'server1');
+    const s1TargetToProbe =
+      primaryServerUrl ||
+      (primaryServerQualityLinks ? Object.values(primaryServerQualityLinks).find((v) => typeof v === 'string' && v.trim()) : '') ||
+      '';
+    const s2TargetToProbe =
+      secondaryServerUrl ||
+      (secondaryServerQualityLinks ? Object.values(secondaryServerQualityLinks).find((v) => typeof v === 'string' && v.trim()) : '') ||
+      '';
+
+    if (s1TargetToProbe) {
+      probeUrlForServer(s1TargetToProbe, 'server1');
     }
-    if (secondaryServerUrl) {
-      probeUrlForServer(secondaryServerUrl, 'server2');
+    if (s2TargetToProbe) {
+      probeUrlForServer(s2TargetToProbe, 'server2');
     }
 
     return () => {
       cancelled = true;
     };
-  }, [selectedServer, primaryServerUrl, secondaryServerUrl]);
+  }, [selectedServer, primaryServerUrl, secondaryServerUrl, primaryServerQualityLinks, secondaryServerQualityLinks]);
 
   // Compute cross-server qualities with [S1] / [S2] badges so both servers' qualities appear in the unified Quality drawer & selector
   const crossServerQualities = useMemo(() => {
@@ -2317,26 +2344,55 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
   };
 
   const handleShare = async () => {
-    const shareData = {
-      title: content.title,
-      text: `Watch ${content.title} on MaxPlay!`,
-      url: window.location.href
-    };
-    if (navigator.share) {
+    const shareTitle = content.title || 'MaxPlay';
+    const shareUrl = window.location.href || 'https://maxplay.app';
+    const shareText = `Watch ${shareTitle} in HD on MaxPlay!`;
+
+    // 1. Native Android Share Sheet inside APK
+    if (NativeBridgeService.shareContentNative(shareTitle, shareText, shareUrl)) {
+      return;
+    }
+
+    // 2. Web Share API (Mobile Browsers)
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
       try {
-        await navigator.share(shareData);
-      } catch (err) {
-        // Share cancelled or failed
-      }
-    } else {
-      try {
-        await navigator.clipboard.writeText(window.location.href);
-        setToastMessage('Link copied to clipboard!');
-        setTimeout(() => setToastMessage(null), 2000);
-      } catch (e) {
-        alert('Link copied to clipboard!');
+        await navigator.share({
+          title: shareTitle,
+          text: shareText,
+          url: shareUrl,
+        });
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
       }
     }
+
+    // 3. Reliable Clipboard + Fallback Copy with Toast
+    const fullCopyText = `${shareText}\n${shareUrl}`;
+    let copied = false;
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(fullCopyText);
+        copied = true;
+      }
+    } catch {}
+
+    if (!copied) {
+      try {
+        const textArea = document.createElement('textarea');
+        textArea.value = fullCopyText;
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        copied = document.execCommand('copy');
+        document.body.removeChild(textArea);
+      } catch {}
+    }
+
+    setToastMessage('Share link copied to clipboard!');
+    setTimeout(() => setToastMessage(null), 2400);
   };
 
   const handleNextEpisode = () => {
@@ -2855,6 +2911,22 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
               selectedServer={selectedServer}
               crossServerQualities={crossServerQualities}
               onLanguageChange={handleUnifiedLanguageSelect}
+              onRequestCrossServerLanguageSwitch={(missingLang) => {
+                const hasS1 = Boolean(primaryServerUrl || Object.keys(primaryServerQualityLinks || {}).length > 0);
+                const hasS2 = Boolean(secondaryServerUrl || Object.keys(secondaryServerQualityLinks || {}).length > 0);
+                const qualBadge = activeQuality && activeQuality !== 'auto' ? ` • ${activeQuality.toUpperCase()}` : '';
+                if (selectedServer === 'server1' && hasS2) {
+                  saveProgressNow(playbackPosition, false, true);
+                  handleSelectServer('server2');
+                  setToastMessage(`Switched to Server 2 • ${missingLang}${qualBadge}`);
+                  setTimeout(() => setToastMessage(null), 2800);
+                } else if (selectedServer === 'server2' && hasS1) {
+                  saveProgressNow(playbackPosition, false, true);
+                  handleSelectServer('server1');
+                  setToastMessage(`Switched to Server 1 • ${missingLang}${qualBadge}`);
+                  setTimeout(() => setToastMessage(null), 2800);
+                }
+              }}
               onQualityChange={(qual) => {
                 const s2Match = /\[S2\]/i.test(qual);
                 const s1Match = /\[S1\]/i.test(qual);

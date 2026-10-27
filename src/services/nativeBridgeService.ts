@@ -100,6 +100,7 @@ interface MaxPlayKotlinBridge {
   openPopunderAd?: (adUrl: string) => boolean;
   closePopunderAd?: () => boolean;
   isPopunderAdOpen?: () => boolean;
+  shareContent?: (title: string, text: string, url: string) => boolean;
 }
 
 export interface ApkUpdateProgressState {
@@ -1400,6 +1401,21 @@ export class NativeBridgeService {
         typeof window.MaxPlayNative?.isPopunderAdOpen === 'function'
       ) {
         return Boolean(window.MaxPlayNative.isPopunderAdOpen());
+      }
+    } catch {}
+    return false;
+  }
+
+  /**
+   * Opens the Native Android Share Sheet (`Intent.ACTION_SEND`) inside the APK.
+   */
+  public static shareContentNative(title: string, text: string, url: string): boolean {
+    try {
+      if (
+        this.isRunningInKotlinApp() &&
+        typeof window.MaxPlayNative?.shareContent === 'function'
+      ) {
+        return Boolean(window.MaxPlayNative.shareContent(title || 'MaxPlay', text || '', url || ''));
       }
     } catch {}
     return false;

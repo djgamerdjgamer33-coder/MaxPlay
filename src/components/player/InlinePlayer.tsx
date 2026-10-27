@@ -158,6 +158,7 @@ interface InlinePlayerProps {
   crossServerQualities?: string[];
   onDiscoveredAudioTracks?: (tracks: string[]) => void;
   onDiscoveredQualities?: (qualities: string[]) => void;
+  onRequestCrossServerLanguageSwitch?: (lang: string) => void;
 }
 
 export const InlinePlayer: React.FC<InlinePlayerProps> = ({
@@ -189,6 +190,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
   crossServerQualities = [],
   onDiscoveredAudioTracks,
   onDiscoveredQualities,
+  onRequestCrossServerLanguageSwitch,
 }) => {
   const { user } = useAuth();
   const playerContainerRef = useRef<HTMLDivElement>(null);
@@ -622,24 +624,46 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
           targetLang
         )
       );
+      // Only fall back to positional index if HLS tracks have generic/unlabeled names (e.g. Track 1, Audio 1, und)
       if (matchIdx === -1 && availableLanguages.length > 0) {
-        const orderIdx = availableLanguages.findIndex(
-          (l) => l.toLowerCase().trim() === targetLang.toLowerCase().trim()
-        );
-        if (orderIdx !== -1 && orderIdx < hlsAudioTracks.length) {
-          matchIdx = orderIdx;
+        const allGeneric = hlsAudioTracks.every((t) => {
+          const n = (t.name || '').toLowerCase().trim();
+          return !n || n.startsWith('audio') || n.startsWith('track') || n === 'default' || n === 'und' || n === 'unknown';
+        });
+        if (allGeneric) {
+          const orderIdx = availableLanguages.findIndex(
+            (l) => l.toLowerCase().trim() === targetLang.toLowerCase().trim()
+          );
+          if (orderIdx !== -1 && orderIdx < hlsAudioTracks.length) {
+            matchIdx = orderIdx;
+          }
         }
       }
-      if (matchIdx !== -1 && hls.audioTrack !== matchIdx) {
-        hls.audioTrack = matchIdx;
-        if (videoRef.current && videoRef.current.readyState >= 1 && videoRef.current.currentTime > 0.2) {
-          try {
-            videoRef.current.currentTime = videoRef.current.currentTime + 0.01;
-          } catch {}
+      if (matchIdx !== -1) {
+        if (
+          hls.audioTrack !== matchIdx ||
+          lastAppliedAudioTrackRef.current.hls !== hls ||
+          lastAppliedAudioTrackRef.current.trackIdx !== matchIdx
+        ) {
+          performInstantHlsAudioSwitch(hls, matchIdx, targetLang, false);
+        }
+      } else if (onRequestCrossServerLanguageSwitch && cleanActiveLang) {
+        // Check if videoSources has a dedicated URL for this language on the current server
+        const hasDirectLangSource =
+          videoSources &&
+          typeof videoSources === 'object' &&
+          Object.keys(videoSources).some(
+            (k) =>
+              k.toLowerCase().trim() === targetLang.toLowerCase().trim() ||
+              ClientHlsDownloader.matchesTargetLanguage({ name: k, language: k, friendly: k }, targetLang)
+          );
+        if (!hasDirectLangSource && lastCrossServerLangReqRef.current !== `${selectedServer}:${targetLang.toLowerCase()}`) {
+          lastCrossServerLangReqRef.current = `${selectedServer}:${targetLang.toLowerCase()}`;
+          onRequestCrossServerLanguageSwitch(targetLang);
         }
       }
     }
-  }, [activeLanguage, availableLanguages, hlsAudioTracks]);
+  }, [activeLanguage, availableLanguages, hlsAudioTracks, selectedServer]);
 
   const [switchingQualityLabel, setSwitchingQualityLabel] = useState<string | null>(null);
   const [qualitySwitchDoneBadge, setQualitySwitchDoneBadge] = useState<string | null>(null);
@@ -647,6 +671,56 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
   const prevActiveQualityPropRef = useRef<string | undefined>(activeQuality);
   const switchFeedbackTimerRef = useRef<NodeJS.Timeout | null>(null);
   const doneBadgeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const audioFlushTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastAppliedAudioTrackRef = useRef<{ hls: Hls | null; trackIdx: number }>({ hls: null, trackIdx: -1 });
+  const lastCrossServerLangReqRef = useRef<string>('');
+
+  const performInstantHlsAudioSwitch = useCallback(
+    (hls: Hls, matchIdx: number, langLabel?: string, showBadge: boolean = true) => {
+      if (!hls || matchIdx < 0) return;
+      lastAppliedAudioTrackRef.current = { hls, trackIdx: matchIdx };
+
+      const video = videoRef.current;
+      const curTime = video && video.currentTime > 0.1 ? video.currentTime : 0;
+      const wasPaused = video ? video.paused : true;
+
+      if (showBadge && langLabel) {
+        setQualitySwitchDoneBadge(`Audio switched to ${langLabel}`);
+        if (doneBadgeTimerRef.current) clearTimeout(doneBadgeTimerRef.current);
+        doneBadgeTimerRef.current = setTimeout(() => {
+          setQualitySwitchDoneBadge(null);
+        }, 2000);
+      }
+
+      // 1. Switch the active audio track index on hls.js
+      hls.audioTrack = matchIdx;
+
+      // 2. Flush buffered old-language audio segments and force immediate reload at current playback time
+      // so even after 10+ consecutive switches (with cached track details) the new language plays in ~150ms.
+      if (audioFlushTimerRef.current) clearTimeout(audioFlushTimerRef.current);
+      audioFlushTimerRef.current = setTimeout(() => {
+        try {
+          if (hlsRef.current !== hls) return;
+          const v = videoRef.current;
+          if (!v || v.readyState < 1) return;
+          const targetT = v.currentTime > 0.15 ? v.currentTime : curTime;
+          try {
+            hls.stopLoad();
+            hls.startLoad(Math.max(0, targetT));
+          } catch {}
+          if (targetT > 0.15) {
+            try {
+              v.currentTime = Math.max(0, targetT - 0.02);
+            } catch {}
+          }
+          if (!wasPaused && v.paused) {
+            v.play().catch(() => {});
+          }
+        } catch {}
+      }, 65);
+    },
+    []
+  );
 
   const triggerQualitySwitchBanner = useCallback((targetQual: string) => {
     const cleanQ = (targetQual || 'Auto').toUpperCase();
@@ -1190,7 +1264,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
             );
           }
 
-          const req = (currentLanguage || activeLanguage || '').trim();
+          const req = (activeLanguage || currentLanguage || '').trim();
           if (req) {
             const matchIdx = parsedAudio.findIndex((a) =>
               ClientHlsDownloader.matchesTargetLanguage(
@@ -1198,8 +1272,11 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
                 req
               )
             );
-            if (matchIdx !== -1 && hls.audioTrack !== matchIdx) {
-              hls.audioTrack = matchIdx;
+            if (matchIdx !== -1) {
+              lastAppliedAudioTrackRef.current = { hls, trackIdx: matchIdx };
+              if (hls.audioTrack !== matchIdx) {
+                hls.audioTrack = matchIdx;
+              }
             }
           }
         }
@@ -1239,7 +1316,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
             );
           }
 
-          const req = (currentLanguage || activeLanguage || '').trim();
+          const req = (activeLanguage || currentLanguage || '').trim();
           if (req) {
             const matchIdx = parsedAudio.findIndex((a: any) =>
               ClientHlsDownloader.matchesTargetLanguage(
@@ -1247,8 +1324,11 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
                 req
               )
             );
-            if (matchIdx !== -1 && hls.audioTrack !== matchIdx) {
-              hls.audioTrack = matchIdx;
+            if (matchIdx !== -1) {
+              lastAppliedAudioTrackRef.current = { hls, trackIdx: matchIdx };
+              if (hls.audioTrack !== matchIdx) {
+                hls.audioTrack = matchIdx;
+              }
             }
           }
         }
@@ -1258,7 +1338,18 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
         if (hls.audioTracks && hls.audioTracks.length > 1 && hls.audioTracks[data.id]) {
           const trk = hls.audioTracks[data.id];
           const friendly = formatLanguageLabel(trk.name, trk.lang, data.id);
+          // Only update currentLanguage from AUDIO_TRACK_SWITCHED if no explicit activeLanguage is set,
+          // or if the switched track actually matches the user's requested language.
+          // This prevents initial default track 0 from overwriting the user's selected language!
+          const requestedLang = (activeLanguage || '').trim();
+          const matchesRequested =
+            !requestedLang ||
+            ClientHlsDownloader.matchesTargetLanguage(
+              { name: trk.name || '', language: trk.lang || '', friendly },
+              requestedLang
+            );
           if (
+            matchesRequested &&
             friendly &&
             !friendly.toLowerCase().startsWith('audio track') &&
             friendly.toLowerCase() !== 'default' &&
@@ -1707,24 +1798,39 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
     setCurrentLanguage(lang);
     if (onLanguageChange) onLanguageChange(lang);
 
-    // 1. If HLS stream has internal audio tracks, switch audio track immediately
+    // 1. If HLS stream has internal audio tracks, switch audio track immediately with buffer flush
     if (hlsRef.current && isHlsStreamRef.current && hlsAudioTracks.length > 0) {
-      const trackIdx = hlsAudioTracks.findIndex((t) =>
+      let trackIdx = hlsAudioTracks.findIndex((t) =>
         ClientHlsDownloader.matchesTargetLanguage(
           { name: (t as any).rawName || t.name, language: t.lang || '', friendly: t.name },
           lang
         )
       );
 
-      if (trackIdx !== -1) {
-        hlsRef.current.audioTrack = trackIdx;
-      } else {
+      if (trackIdx === -1) {
         const matchNum = lang.match(/(\d+)/);
         if (matchNum) {
           const idx = parseInt(matchNum[1], 10) - 1;
           if (idx >= 0 && idx < hlsAudioTracks.length) {
-            hlsRef.current.audioTrack = idx;
+            trackIdx = idx;
           }
+        }
+      }
+
+      if (trackIdx !== -1) {
+        performInstantHlsAudioSwitch(hlsRef.current, trackIdx, lang, true);
+      } else if (onRequestCrossServerLanguageSwitch) {
+        const hasDirectLangSource =
+          videoSources &&
+          typeof videoSources === 'object' &&
+          Object.keys(videoSources).some(
+            (k) =>
+              k.toLowerCase().trim() === lang.toLowerCase().trim() ||
+              ClientHlsDownloader.matchesTargetLanguage({ name: k, language: k, friendly: k }, lang)
+          );
+        if (!hasDirectLangSource) {
+          lastCrossServerLangReqRef.current = `${selectedServer}:${lang.toLowerCase().trim()}`;
+          onRequestCrossServerLanguageSwitch(lang);
         }
       }
     }
