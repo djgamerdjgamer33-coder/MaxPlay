@@ -1449,6 +1449,8 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
   let primaryServerUrl = SmartStreamService.sanitizeStreamUrl(
     playerVideoUrl || firstNonEmptyUrl(playerQualityLinks, content.videoUrl)
   );
+  const primaryServerQualityLinks: Record<string, string> =
+    playerQualityLinks && typeof playerQualityLinks === 'object' ? { ...playerQualityLinks } : {};
   let secondaryServerUrl = '';
   let secondaryServerQualityLinks: Record<string, string> = {};
   let secondaryVideoSources: Record<string, any> = {};
