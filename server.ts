@@ -1529,16 +1529,18 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           }
 
           const host = req.get('host') || 'localhost:3000';
-          const proto = (req.secure || req.headers['x-forwarded-proto'] === 'https' || host.includes('hf.space')) ? 'https' : 'http';
-          const serverOrigin = `${proto}://${host}`;
+          const reqOrigin = String(req.headers.origin || '');
+          const isExternalCrossOrigin = Boolean(reqOrigin && !reqOrigin.includes(host) && host.includes('hf.space'));
+          const serverOrigin = isExternalCrossOrigin ? `https://${host}` : '';
+          const refParam = customRef ? `&referer=${encodeURIComponent(customRef)}` : '';
 
           // Wrap master m3u8 in proxy for Web Browsers, while preserving rawM3u8Url for Native Kotlin APK
-          const proxiedMaster = `${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(fmResult.m3u8Url)}`;
+          const proxiedMaster = `${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(fmResult.m3u8Url)}${refParam}`;
 
           const proxiedQualityLinks: Record<string, string> = {};
           if (streamMeta.qualityLinks && typeof streamMeta.qualityLinks === 'object') {
             for (const [q, link] of Object.entries(streamMeta.qualityLinks)) {
-              proxiedQualityLinks[q] = `${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(link)}`;
+              proxiedQualityLinks[q] = `${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(link)}${refParam}`;
             }
           }
           if (Object.keys(proxiedQualityLinks).length === 0) {
@@ -1959,8 +1961,9 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       }
 
       const host = req.get("host") || "localhost:3000";
-      const proto = (req.secure || req.headers["x-forwarded-proto"] === "https" || host.includes("hf.space")) ? "https" : "http";
-      const serverOrigin = `${proto}://${host}`;
+      const reqOrigin = String(req.headers.origin || "");
+      const isExternalCrossOrigin = Boolean(reqOrigin && !reqOrigin.includes(host) && host.includes("hf.space"));
+      const serverOrigin = isExternalCrossOrigin ? `https://${host}` : "";
 
       let referer = (req.query.referer as string || "").trim();
       if (!referer) {
@@ -1987,7 +1990,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           ...(originHeader ? { "Origin": originHeader } : {}),
           "Accept": "*/*"
         },
-        signal: AbortSignal.timeout(15000)
+        signal: AbortSignal.timeout(25000)
       });
 
       if (!upstream.ok) {
@@ -1998,6 +2001,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       const text = await upstream.text();
       const lines = text.split("\n");
       const rewrittenLines: string[] = [];
+      const refParam = referer ? `&referer=${encodeURIComponent(referer)}` : "";
 
       for (let i = 0; i < lines.length; i++) {
         let line = lines[i].trim();
@@ -2011,21 +2015,21 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           if (line.startsWith("#EXT-X-MEDIA") && line.includes('URI="')) {
             line = line.replace(/URI="([^"]+)"/, (_match, uri) => {
               const full = joinHlsUrl(uri, targetUrl);
-              return `URI="${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(full)}"`;
+              return `URI="${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(full)}${refParam}"`;
             });
           }
           // Check for #EXT-X-KEY:METHOD=...,URI="..."
           else if (line.startsWith("#EXT-X-KEY") && line.includes('URI="')) {
             line = line.replace(/URI="([^"]+)"/, (_match, uri) => {
               const full = joinHlsUrl(uri, targetUrl);
-              return `URI="${serverOrigin}/proxy/ts?url=${encodeURIComponent(full)}"`;
+              return `URI="${serverOrigin}/proxy/ts?url=${encodeURIComponent(full)}${refParam}"`;
             });
           }
           // Check for #EXT-X-I-FRAME-STREAM-INF:...URI="..."
           else if (line.startsWith("#EXT-X-I-FRAME-STREAM-INF") && line.includes('URI="')) {
             line = line.replace(/URI="([^"]+)"/, (_match, uri) => {
               const full = joinHlsUrl(uri, targetUrl);
-              return `URI="${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(full)}"`;
+              return `URI="${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(full)}${refParam}"`;
             });
           }
           rewrittenLines.push(line);
@@ -2033,9 +2037,9 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           // Line is a URL (variant playlist or media segment)
           const fullUrl = joinHlsUrl(line, targetUrl);
           if (fullUrl.includes(".m3u8") || fullUrl.includes("m3u8")) {
-            rewrittenLines.push(`${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(fullUrl)}`);
+            rewrittenLines.push(`${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(fullUrl)}${refParam}`);
           } else {
-            rewrittenLines.push(`${serverOrigin}/proxy/ts?url=${encodeURIComponent(fullUrl)}`);
+            rewrittenLines.push(`${serverOrigin}/proxy/ts?url=${encodeURIComponent(fullUrl)}${refParam}`);
           }
         }
       }
@@ -2125,6 +2129,16 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       if (upstream.body) {
         const { Readable } = await import("stream");
         const nodeStream = Readable.fromWeb(upstream.body as any);
+        nodeStream.on("error", () => {
+          try {
+            if (!res.writableEnded) res.end();
+          } catch {}
+        });
+        req.on("close", () => {
+          try {
+            nodeStream.destroy();
+          } catch {}
+        });
         nodeStream.pipe(res);
       } else {
         const arrayBuf = await upstream.arrayBuffer();

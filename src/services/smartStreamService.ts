@@ -33,7 +33,7 @@ interface ClientCachedStream {
   meta?: CachedStreamMetadata;
 }
 
-const CACHE_PREFIX = "maxplay_hls_stream_";
+const CACHE_PREFIX = "maxplay_hls_stream_v2_";
 
 export class SmartStreamService {
   /**
@@ -182,12 +182,15 @@ export class SmartStreamService {
     let trimmed = rawUrl.trim();
     if (!trimmed) return "";
 
-    // Unwrap legacy or external proxy URLs (e.g. nawazkhan001-mw-hub-master.hf.space or /proxy/ts?url=...)
+    // Unwrap legacy external proxy URLs (e.g. nawazkhan001-mw-hub-master.hf.space or /proxy/ts?url=...)
+    // Only unwrap /proxy/m3u8?url= inside the native Kotlin app where WebView intercepts headers directly;
+    // in web browsers, /proxy/m3u8?url= MUST remain wrapped so SprintCDN/Byse requests include Referer & server ASN!
+    const isKotlinApp = NativeBridgeService.isRunningInKotlinApp();
     for (let depth = 0; depth < 3; depth++) {
       if (
         trimmed.includes("nawazkhan001-mw-hub-master.hf.space") ||
         trimmed.includes("/proxy/ts?url=") ||
-        (trimmed.includes("/proxy/m3u8?url=") && !trimmed.startsWith("/"))
+        (isKotlinApp && trimmed.includes("/proxy/m3u8?url="))
       ) {
         const m = trimmed.match(/[?&]url=([^&#]+)/i);
         if (m && m[1]) {
@@ -201,6 +204,20 @@ export class SmartStreamService {
         }
       }
       break;
+    }
+
+    // In web browsers, normalize any http(s)://.../proxy/m3u8?url=... (except legacy hf.space) to relative /proxy/m3u8?url=...
+    // so it never triggers Mixed Content (http:// on https://) or localhost:3000 connection errors!
+    if (
+      !isKotlinApp &&
+      trimmed.includes("/proxy/m3u8?url=") &&
+      !trimmed.includes("nawazkhan001-mw-hub-master.hf.space") &&
+      !trimmed.startsWith("/")
+    ) {
+      const idx = trimmed.indexOf("/proxy/m3u8?url=");
+      if (idx !== -1) {
+        return trimmed.slice(idx).split(/\s+/)[0];
+      }
     }
 
     if (
@@ -593,25 +610,82 @@ export class SmartStreamService {
         const buf = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
         return toB64Url(new Uint8Array(buf));
       };
-      const solvePowAsync = async (nonceStr: string, difficulty: number): Promise<string> => {
-        const fullBytes = Math.floor(difficulty / 8);
-        const remBits = difficulty % 8;
-        const mask = remBits > 0 ? (0xff << (8 - remBits)) & 0xff : 0;
-        const enc = new TextEncoder();
-        for (let counter = 0; counter < 500000; counter++) {
-          const candidate = `${nonceStr}${counter}`;
-          const digest = new Uint8Array(await window.crypto.subtle.digest("SHA-256", enc.encode(candidate)));
-          let ok = true;
-          for (let i = 0; i < fullBytes; i++) {
-            if (digest[i] !== 0) {
-              ok = false;
-              break;
+      const solveBysePow = (nonce: string, difficulty: number): string => {
+        if (difficulty <= 0) return "0";
+        const prefix = nonce + ":";
+        let p0 = 1779033703, p1 = 3144134277, p2 = 1013904242, p3 = 2773480762;
+        for (let i = 0; i < prefix.length; i++) {
+          p0 = (p0 + (prefix.charCodeAt(i) & 255)) >>> 0;
+          p0 = ((p0 << 7) | (p0 >>> 25)) >>> 0;
+          p0 = (p0 + p1) >>> 0; p3 = (((p3 ^ p0) << 16) | ((p3 ^ p0) >>> 16)) >>> 0;
+          p2 = (p2 + p3) >>> 0; p1 = (((p1 ^ p2) << 12) | ((p1 ^ p2) >>> 20)) >>> 0;
+          p0 = (p0 + p1) >>> 0; p3 = (((p3 ^ p0) << 8) | ((p3 ^ p0) >>> 24)) >>> 0;
+          p2 = (p2 + p3) >>> 0; p1 = (((p1 ^ p2) << 7) | ((p1 ^ p2) >>> 25)) >>> 0;
+        }
+        const r = new Uint32Array(512);
+        const digits = new Uint8Array(12);
+        for (let s = 0; s < 5000000; s++) {
+          let e0 = p0, e1 = p1, e2 = p2, e3 = p3;
+          let temp = s;
+          let len = 0;
+          if (temp === 0) {
+            digits[0] = 48;
+            len = 1;
+          } else {
+            while (temp > 0) {
+              digits[len++] = 48 + (temp % 10);
+              temp = (temp / 10) | 0;
             }
           }
-          if (ok && remBits > 0 && (digest[fullBytes] & mask) !== 0) {
-            ok = false;
+          for (let i = len - 1; i >= 0; i--) {
+            e0 = (e0 + digits[i]) >>> 0;
+            e0 = ((e0 << 7) | (e0 >>> 25)) >>> 0;
+            e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+            e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+            e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+            e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
           }
-          if (ok) return String(counter);
+          for (let i = 0; i < 8; i++) {
+            e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+            e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+            e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+            e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
+          }
+          for (let i = 0; i < 512; i++) {
+            e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+            e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+            e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+            e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
+            r[i] = (e0 ^ e2) >>> 0;
+          }
+          for (let i = 0; i < 2; i++) {
+            for (let k = 0; k < 512; k++) {
+              const a = r[k] & 511;
+              let c = (r[k] + r[a]) >>> 0;
+              c = ((c << 13) | (c >>> 19)) >>> 0;
+              c = (c ^ (Math.imul(r[(k + 1) & 511], 2654435761) >>> 0)) >>> 0;
+              r[k] = c;
+              e0 = (e0 ^ c) >>> 0;
+              e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+              e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+              e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+              e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
+            }
+          }
+          e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+          e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+          e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+          e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
+          let sWord = e0;
+          for (let c = 0; c < 64; c++) {
+            const d = r[c];
+            sWord = (sWord + d) >>> 0;
+            sWord = ((sWord << 5) | (sWord >>> 27)) >>> 0;
+            sWord = (sWord ^ (Math.imul(d, 2246822519) >>> 0)) >>> 0;
+          }
+          if (Math.clz32((sWord ^ e2) >>> 0) >= difficulty) {
+            return String(s);
+          }
         }
         return "0";
       };
@@ -733,7 +807,7 @@ export class SmartStreamService {
             const powNonce = capCh.pow_nonce || capCh.nonce;
             const powDiff = capCh.pow_difficulty || capCh.difficulty || 16;
             const powToken = capCh.pow_token || capCh.challenge_id;
-            const solutionStr = await solvePowAsync(powNonce, powDiff);
+            const solutionStr = solveBysePow(powNonce, powDiff);
 
             const capVerRes = await fetch(`${apiOrigin}/api/videos/${code}/embed/captcha/verify`, {
               method: "POST",
@@ -1029,6 +1103,33 @@ export class SmartStreamService {
           };
         }
 
+        // If backend failed on Byse/Filemoon in web browser, try client-side Byse extractor before returning embed fallback
+        if (isByseOrFilemoon) {
+          const clientByse = await this.extractByseClientSide(trimmed);
+          if (clientByse.ok && clientByse.m3u8Url) {
+            const ttlMs = 170 * 60 * 1000;
+            const expiresAt = Date.now() + ttlMs;
+            const refUrl = clientByse.meta?.referer || "https://byseraguci.com/";
+            const chosenUrl = isKotlinApp
+              ? clientByse.m3u8Url
+              : `/proxy/m3u8?url=${encodeURIComponent(clientByse.m3u8Url)}&referer=${encodeURIComponent(refUrl)}`;
+            const meta: CachedStreamMetadata = {
+              ...(clientByse.meta || {}),
+              rawM3u8Url: clientByse.m3u8Url,
+              proxiedM3u8Url: chosenUrl,
+            };
+            this.setClientCache(trimmed, chosenUrl, expiresAt, meta);
+            this.setClientCache(chosenUrl, chosenUrl, expiresAt, meta);
+            return {
+              streamUrl: chosenUrl,
+              isExtracted: true,
+              cached: false,
+              isEmbed: false,
+              expiresAt,
+            };
+          }
+        }
+
         // If backend returned embed fallback
         if (result.isEmbed && result.fallbackUrl) {
           console.log("[SmartStreamService] Backend provided embed fallback:", result.fallbackUrl);
@@ -1042,6 +1143,33 @@ export class SmartStreamService {
       }
     } catch (proxyErr) {
       console.warn("[SmartStreamService] Backend proxy call failed or timed out:", proxyErr);
+    }
+
+    // 3.5 If backend proxy timed out on Byse/Filemoon, try client-side Byse extractor
+    if (isByseOrFilemoon) {
+      const clientByse = await this.extractByseClientSide(trimmed);
+      if (clientByse.ok && clientByse.m3u8Url) {
+        const ttlMs = 170 * 60 * 1000;
+        const expiresAt = Date.now() + ttlMs;
+        const refUrl = clientByse.meta?.referer || "https://byseraguci.com/";
+        const chosenUrl = isKotlinApp
+          ? clientByse.m3u8Url
+          : `/proxy/m3u8?url=${encodeURIComponent(clientByse.m3u8Url)}&referer=${encodeURIComponent(refUrl)}`;
+        const meta: CachedStreamMetadata = {
+          ...(clientByse.meta || {}),
+          rawM3u8Url: clientByse.m3u8Url,
+          proxiedM3u8Url: chosenUrl,
+        };
+        this.setClientCache(trimmed, chosenUrl, expiresAt, meta);
+        this.setClientCache(chosenUrl, chosenUrl, expiresAt, meta);
+        return {
+          streamUrl: chosenUrl,
+          isExtracted: true,
+          cached: false,
+          isEmbed: false,
+          expiresAt,
+        };
+      }
     }
 
     // 4. Fallback Tier 2: Check for direct embed iframe URL (e.g. voe.sx/e/ID)

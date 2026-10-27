@@ -1081,11 +1081,13 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
     SmartStreamService.resolveStream(activeVideoUrl, { forceRefresh: false })
       .then(async (res) => {
         if (!isMounted) return;
-        // If first extraction returned an embed fallback for a Voe/Filemoon/Byse stream, retry once with forceRefresh: true
+        const isExtractable = SmartStreamService.isExtractableSource(activeVideoUrl, isSmartHls);
+        // If first extraction returned an embed fallback for a Voe/Filemoon/Byse stream, retry with forceRefresh: true
         // so it extracts the real .m3u8 instead of triggering an iframe!
         let finalRes = res;
-        if (res.isEmbed && SmartStreamService.isExtractableSource(activeVideoUrl, isSmartHls)) {
+        if (res.isEmbed && isExtractable) {
           try {
+            SmartStreamService.clearClientCache(activeVideoUrl);
             const retryRes = await SmartStreamService.resolveStream(activeVideoUrl, { forceRefresh: true });
             if (!isMounted) return;
             if (retryRes && retryRes.streamUrl && !retryRes.isEmbed) {
@@ -1093,9 +1095,14 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
             }
           } catch {}
         }
-        if (finalRes.isEmbed) {
+        if (finalRes.isEmbed && !isExtractable) {
           setEmbedFallbackUrl(finalRes.streamUrl);
           setResolvedStreamUrl('');
+        } else if (finalRes.isEmbed && isExtractable) {
+          // Never force an iframe for extractable Voe/Filemoon/Byse sources — keep player in native HLS mode
+          setEmbedFallbackUrl('');
+          setIsLoading(false);
+          setPlaybackError('Stream is temporarily busy. Tap Retry to reload.');
         } else {
           setResolvedStreamUrl(finalRes.streamUrl);
           setEmbedFallbackUrl('');
@@ -1109,18 +1116,9 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
         if (tryStepDownToWeakerQuality()) {
           return;
         }
-        const fallback = SmartStreamService.getEmbedUrl(activeVideoUrl);
-        if (fallback) {
-          setEmbedFallbackUrl(fallback);
-          setResolvedStreamUrl('');
-          setIsResolvingStream(false);
-          setIsLoading(false);
-          setPlaybackError(null);
-        } else {
-          setIsResolvingStream(false);
-          setIsLoading(false);
-          setPlaybackError(err.message || 'Failed to extract video stream. Please try again.');
-        }
+        setIsResolvingStream(false);
+        setIsLoading(false);
+        setPlaybackError(err.message || 'Failed to extract video stream. Please try again.');
       });
 
     return () => {
@@ -1204,10 +1202,12 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
         maxBufferLength: 45,
         maxMaxBufferLength: 90,
         maxBufferSize: 60 * 1000 * 1000,
-        fragLoadingMaxRetry: 4,
-        manifestLoadingTimeOut: 7000,
-        manifestLoadingMaxRetry: 1,
-        levelLoadingMaxRetry: 2,
+        fragLoadingTimeOut: 30000,
+        fragLoadingMaxRetry: 6,
+        manifestLoadingTimeOut: 20000,
+        manifestLoadingMaxRetry: 4,
+        levelLoadingTimeOut: 20000,
+        levelLoadingMaxRetry: 4,
       });
       hlsRef.current = hls;
       hls.loadSource(resolvedStreamUrl);
@@ -1413,16 +1413,19 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR: {
-              // 1. If we loaded a /proxy/m3u8?url=... wrapper and the server proxy failed/timed out on SprintCDN,
-              // immediately try the unwrapped direct rawM3u8Url before giving up!
-              if (resolvedStreamUrl.includes('/proxy/m3u8?url=')) {
+              // 1. Only unwrap /proxy/m3u8?url=... inside the native Kotlin APK where WebView injects Referer directly.
+              // In web browsers, SprintCDN/Byse streams MUST stay routed through /proxy/m3u8 (unwrapping causes 403/CORS).
+              if (
+                NativeBridgeService.isRunningInKotlinApp() &&
+                resolvedStreamUrl.includes('/proxy/m3u8?url=')
+              ) {
                 try {
                   const u = new URL(resolvedStreamUrl, window.location.origin);
                   const rawTarget = u.searchParams.get('url');
                   if (rawTarget) {
                     const decodedRaw = decodeURIComponent(rawTarget).trim();
                     if (decodedRaw && decodedRaw !== resolvedStreamUrl) {
-                      console.warn('[SmartPlayer] Proxy manifest failed; switching to direct CDN stream...');
+                      console.warn('[SmartPlayer] Proxy manifest failed in APK; switching to direct CDN stream...');
                       setResolvedStreamUrl(decodedRaw);
                       return;
                     }
@@ -1430,15 +1433,22 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
                 } catch {}
               }
 
-              // 2. Try stepping down to a weaker quality if user's connection can't sustain high bitrate
-              if (networkStruggleCountRef.current >= 1 && tryStepDownToWeakerQuality()) {
+              // 2. First attempt seamless recovery via hls.startLoad() on transient segment/playlist timeouts
+              if (networkStruggleCountRef.current < 2) {
+                networkStruggleCountRef.current += 1;
+                console.warn('[SmartPlayer] Transient network error, recovering via hls.startLoad()...');
+                hls.startLoad();
+                return;
+              }
+
+              // 3. Try stepping down to a weaker quality if user's connection can't sustain high bitrate
+              if (tryStepDownToWeakerQuality()) {
                 networkStruggleCountRef.current = 0;
                 hls.startLoad();
                 return;
               }
-              networkStruggleCountRef.current += 1;
 
-              // 3. Smart retry if 3-hour stream token expired (only once)
+              // 4. Smart retry if 3-hour stream token expired (only once, and NEVER fallback to iframe!)
               if (
                 SmartStreamService.isExtractableSource(activeVideoUrl, isSmartHls) &&
                 !streamRetryAttemptedRef.current
@@ -1449,50 +1459,18 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
                 SmartStreamService.clearClientCache(activeVideoUrl);
                 SmartStreamService.resolveStream(activeVideoUrl, { forceRefresh: true })
                   .then((res) => {
-                    if (res.isEmbed) {
-                      setEmbedFallbackUrl(res.streamUrl);
-                      setResolvedStreamUrl('');
-                      setIsLoading(false);
-                    } else if (res.streamUrl && res.streamUrl !== resolvedStreamUrl) {
+                    if (!res.isEmbed && res.streamUrl && res.streamUrl !== resolvedStreamUrl) {
                       setResolvedStreamUrl(res.streamUrl);
                       setEmbedFallbackUrl('');
                     } else {
-                      // Same stream URL failed again -> fall back to embed player immediately
-                      const fallback = SmartStreamService.getEmbedUrl(activeVideoUrl);
-                      if (fallback) {
-                        setEmbedFallbackUrl(fallback);
-                        setResolvedStreamUrl('');
-                        setIsLoading(false);
-                        setPlaybackError(null);
-                      } else {
-                        hls.startLoad();
-                      }
+                      setIsLoading(false);
+                      hls.startLoad();
                     }
                   })
-                  .catch((e) => {
-                    if (tryStepDownToWeakerQuality()) return;
-                    const fallback = SmartStreamService.getEmbedUrl(activeVideoUrl);
-                    if (fallback) {
-                      setEmbedFallbackUrl(fallback);
-                      setResolvedStreamUrl('');
-                      setIsLoading(false);
-                      setPlaybackError(null);
-                    } else {
-                      setIsLoading(false);
-                      setPlaybackError('Stream token expired. Renewal failed: ' + e.message);
-                    }
+                  .catch(() => {
+                    setIsLoading(false);
+                    hls.startLoad();
                   });
-                return;
-              }
-
-              // 4. If retry already attempted or manifest failed to load, fall back to embed iframe immediately!
-              const embedUrlFallback = SmartStreamService.getEmbedUrl(activeVideoUrl);
-              if (embedUrlFallback) {
-                console.warn('[SmartPlayer] Direct HLS blocked by CDN/CORS; switching to Seamless Embed Player:', embedUrlFallback);
-                setEmbedFallbackUrl(embedUrlFallback);
-                setResolvedStreamUrl('');
-                setIsLoading(false);
-                setPlaybackError(null);
                 return;
               }
 
