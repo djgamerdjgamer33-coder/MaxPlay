@@ -647,23 +647,9 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
         ) {
           performInstantHlsAudioSwitch(hls, matchIdx, targetLang, false);
         }
-      } else if (onRequestCrossServerLanguageSwitch && cleanActiveLang) {
-        // Check if videoSources has a dedicated URL for this language on the current server
-        const hasDirectLangSource =
-          videoSources &&
-          typeof videoSources === 'object' &&
-          Object.keys(videoSources).some(
-            (k) =>
-              k.toLowerCase().trim() === targetLang.toLowerCase().trim() ||
-              ClientHlsDownloader.matchesTargetLanguage({ name: k, language: k, friendly: k }, targetLang)
-          );
-        if (!hasDirectLangSource && lastCrossServerLangReqRef.current !== `${selectedServer}:${targetLang.toLowerCase()}`) {
-          lastCrossServerLangReqRef.current = `${selectedServer}:${targetLang.toLowerCase()}`;
-          onRequestCrossServerLanguageSwitch(targetLang);
-        }
       }
     }
-  }, [activeLanguage, availableLanguages, hlsAudioTracks, selectedServer]);
+  }, [activeLanguage, availableLanguages, hlsAudioTracks]);
 
   const [switchingQualityLabel, setSwitchingQualityLabel] = useState<string | null>(null);
   const [qualitySwitchDoneBadge, setQualitySwitchDoneBadge] = useState<string | null>(null);
@@ -672,6 +658,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
   const switchFeedbackTimerRef = useRef<NodeJS.Timeout | null>(null);
   const doneBadgeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const audioFlushTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingAudioFlushRef = useRef<boolean>(false);
   const lastAppliedAudioTrackRef = useRef<{ hls: Hls | null; trackIdx: number }>({ hls: null, trackIdx: -1 });
   const lastCrossServerLangReqRef = useRef<string>('');
 
@@ -679,9 +666,9 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
     (hls: Hls, matchIdx: number, langLabel?: string, showBadge: boolean = true) => {
       if (!hls || matchIdx < 0) return;
       lastAppliedAudioTrackRef.current = { hls, trackIdx: matchIdx };
+      pendingAudioFlushRef.current = true;
 
       const video = videoRef.current;
-      const curTime = video && video.currentTime > 0.1 ? video.currentTime : 0;
       const wasPaused = video ? video.paused : true;
 
       if (showBadge && langLabel) {
@@ -692,32 +679,28 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
         }, 2000);
       }
 
-      // 1. Switch the active audio track index on hls.js
+      // 1. Switch the active audio track index on hls.js (never call stopLoad() here so the new audio playlist fetch is never aborted!)
       hls.audioTrack = matchIdx;
 
-      // 2. Flush buffered old-language audio segments and force immediate reload at current playback time
-      // so even after 10+ consecutive switches (with cached track details) the new language plays in ~150ms.
+      // 2. Fallback micro-seek if track playlist was already cached and AUDIO_TRACK_SWITCHED fired synchronously
       if (audioFlushTimerRef.current) clearTimeout(audioFlushTimerRef.current);
       audioFlushTimerRef.current = setTimeout(() => {
+        if (!pendingAudioFlushRef.current) return;
+        pendingAudioFlushRef.current = false;
         try {
           if (hlsRef.current !== hls) return;
           const v = videoRef.current;
           if (!v || v.readyState < 1) return;
-          const targetT = v.currentTime > 0.15 ? v.currentTime : curTime;
-          try {
-            hls.stopLoad();
-            hls.startLoad(Math.max(0, targetT));
-          } catch {}
-          if (targetT > 0.15) {
+          if (v.currentTime > 0.2) {
             try {
-              v.currentTime = Math.max(0, targetT - 0.02);
+              v.currentTime = v.currentTime + 0.05;
             } catch {}
           }
           if (!wasPaused && v.paused) {
             v.play().catch(() => {});
           }
         } catch {}
-      }, 65);
+      }, 220);
     },
     []
   );
@@ -1096,13 +1079,25 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
     setIsLoading(true);
 
     SmartStreamService.resolveStream(activeVideoUrl, { forceRefresh: false })
-      .then((res) => {
+      .then(async (res) => {
         if (!isMounted) return;
-        if (res.isEmbed) {
-          setEmbedFallbackUrl(res.streamUrl);
+        // If first extraction returned an embed fallback for a Voe/Filemoon/Byse stream, retry once with forceRefresh: true
+        // so it extracts the real .m3u8 instead of triggering an iframe!
+        let finalRes = res;
+        if (res.isEmbed && SmartStreamService.isExtractableSource(activeVideoUrl, isSmartHls)) {
+          try {
+            const retryRes = await SmartStreamService.resolveStream(activeVideoUrl, { forceRefresh: true });
+            if (!isMounted) return;
+            if (retryRes && retryRes.streamUrl && !retryRes.isEmbed) {
+              finalRes = retryRes;
+            }
+          } catch {}
+        }
+        if (finalRes.isEmbed) {
+          setEmbedFallbackUrl(finalRes.streamUrl);
           setResolvedStreamUrl('');
         } else {
-          setResolvedStreamUrl(res.streamUrl);
+          setResolvedStreamUrl(finalRes.streamUrl);
           setEmbedFallbackUrl('');
         }
         setIsResolvingStream(false);
@@ -1335,6 +1330,24 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
       });
 
       hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => {
+        // When a user-initiated audio switch completes loading the new track playlist, flush old buffered audio via a 50ms micro-seek
+        if (pendingAudioFlushRef.current) {
+          pendingAudioFlushRef.current = false;
+          if (audioFlushTimerRef.current) {
+            clearTimeout(audioFlushTimerRef.current);
+            audioFlushTimerRef.current = null;
+          }
+          if (video.readyState >= 1 && video.currentTime > 0.2) {
+            const wasPausedNow = video.paused;
+            try {
+              video.currentTime = video.currentTime + 0.05;
+            } catch {}
+            if (!wasPausedNow && video.paused) {
+              video.play().catch(() => {});
+            }
+          }
+        }
+
         if (hls.audioTracks && hls.audioTracks.length > 1 && hls.audioTracks[data.id]) {
           const trk = hls.audioTracks[data.id];
           const friendly = formatLanguageLabel(trk.name, trk.lang, data.id);

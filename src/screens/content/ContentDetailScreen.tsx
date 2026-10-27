@@ -1413,7 +1413,14 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
         for (const item of src) {
           const qId = String(item?.id || item?.quality || '').trim();
           const qUrl = SmartStreamService.sanitizeStreamUrl(item?.url || '');
-          if (qId && qUrl && !out[qId] && qId.toLowerCase() !== 'auto') {
+          // Ignore temporary expiring .m3u8 tokens stored inside downloadQualities verification arrays
+          const isTempHlsToken =
+            qUrl.includes('.m3u8') ||
+            qUrl.includes('/proxy/m3u8') ||
+            qUrl.includes('sprintcdn') ||
+            qUrl.includes('owphbf') ||
+            /[?&](t|token|exp|expires)=/i.test(qUrl);
+          if (qId && qUrl && !isTempHlsToken && !out[qId] && qId.toLowerCase() !== 'auto') {
             out[qId] = qUrl;
           }
         }
@@ -1702,8 +1709,7 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
     const s1VerifiedAudios = isSeries && !isMovie
       ? (currentEpisode as any)?.audioTracks || epPart0?.audioTracks
       : (activeMoviePart as any)?.audioTracks || contentPart0?.audioTracks || (content as any)?.audioTracks;
-    // Only use saved s1VerifiedAudios for s1List if live HLS probing hasn't discovered tracks yet
-    if (s1List.length === 0 && Array.isArray(s1VerifiedAudios)) {
+    if (Array.isArray(s1VerifiedAudios)) {
       s1VerifiedAudios.forEach((l) => addLangTo(s1List, l));
     }
     if (currentEpisode?.videoSources && typeof currentEpisode.videoSources === 'object') {
@@ -1736,7 +1742,7 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
     const s2VerifiedAudios = isSeries && !isMovie
       ? (currentEpisode as any)?.secondaryAudioTracks || epPart0?.secondaryAudioTracks
       : (activeMoviePart as any)?.secondaryAudioTracks || contentPart0?.secondaryAudioTracks || (content as any)?.secondaryAudioTracks;
-    if (s2List.length === 0 && Array.isArray(s2VerifiedAudios)) {
+    if (Array.isArray(s2VerifiedAudios)) {
       s2VerifiedAudios.forEach((l) => addLangTo(s2List, l));
     }
     if (secondaryVideoSources && typeof secondaryVideoSources === 'object') {
@@ -1866,6 +1872,15 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
       const inS2 = matchesInList(cleanLang, s2SpecificLanguages);
       const qualBadge = activeQuality && activeQuality !== 'auto' ? ` • ${activeQuality.toUpperCase()}` : '';
 
+      // If the language already exists on the currently active server (and wasn't explicitly tagged for the other server),
+      // keep the current server and switch the audio track directly in-place!
+      if (selectedServer === 'server1' && inS1 && !s2TagMatch) {
+        return;
+      }
+      if (selectedServer === 'server2' && inS2 && !s1TagMatch) {
+        return;
+      }
+
       if (selectedServer === 'server1' && hasS2) {
         if (s2TagMatch || (!inS1 && (inS2 || s1SpecificLanguages.length > 0))) {
           handleSelectServer('server2');
@@ -1894,6 +1909,15 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
     ]
   );
 
+  const s1ProbeTargetUrl =
+    primaryServerUrl ||
+    (primaryServerQualityLinks ? Object.values(primaryServerQualityLinks).find((v) => typeof v === 'string' && v.trim()) : '') ||
+    '';
+  const s2ProbeTargetUrl =
+    secondaryServerUrl ||
+    (secondaryServerQualityLinks ? Object.values(secondaryServerQualityLinks).find((v) => typeof v === 'string' && v.trim()) : '') ||
+    '';
+
   // Proactively probe both Server 1 and Server 2 master playlists so multi-language audio tracks and cross-server qualities (S1 / S2) appear immediately
   useEffect(() => {
     let cancelled = false;
@@ -1916,24 +1940,12 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
                 const next = Array.from(new Set([...prev, ...meta.audioTracks!]));
                 return next.length !== prev.length ? next : prev;
               });
-              if (srv === selectedServer) {
-                setDiscoveredAudioTracks((prev) => {
-                  const next = Array.from(new Set([...prev, ...meta.audioTracks!]));
-                  return next.length !== prev.length ? next : prev;
-                });
-              }
             }
             if (meta && Array.isArray(meta.qualities) && meta.qualities.length > 0) {
               setSrvQualities((prev) => {
                 const next = Array.from(new Set([...prev, ...meta.qualities!]));
                 return next.length !== prev.length ? next : prev;
               });
-              if (srv === selectedServer) {
-                setDiscoveredQualities((prev) => {
-                  const next = Array.from(new Set([...prev, ...meta.qualities!]));
-                  return next.length !== prev.length ? next : prev;
-                });
-              }
             }
           }
         }
@@ -1947,12 +1959,6 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
                 const next = Array.from(new Set([...prev, ...labels]));
                 return next.length !== prev.length ? next : prev;
               });
-              if (srv === selectedServer) {
-                setDiscoveredAudioTracks((prev) => {
-                  const next = Array.from(new Set([...prev, ...labels]));
-                  return next.length !== prev.length ? next : prev;
-                });
-              }
             }
           }
           if (parsed.qualities && parsed.qualities.length > 0) {
@@ -1962,38 +1968,23 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
                 const next = Array.from(new Set([...prev, ...qLabels]));
                 return next.length !== prev.length ? next : prev;
               });
-              if (srv === selectedServer) {
-                setDiscoveredQualities((prev) => {
-                  const next = Array.from(new Set([...prev, ...qLabels]));
-                  return next.length !== prev.length ? next : prev;
-                });
-              }
             }
           }
         }
       } catch {}
     };
 
-    const s1TargetToProbe =
-      primaryServerUrl ||
-      (primaryServerQualityLinks ? Object.values(primaryServerQualityLinks).find((v) => typeof v === 'string' && v.trim()) : '') ||
-      '';
-    const s2TargetToProbe =
-      secondaryServerUrl ||
-      (secondaryServerQualityLinks ? Object.values(secondaryServerQualityLinks).find((v) => typeof v === 'string' && v.trim()) : '') ||
-      '';
-
-    if (s1TargetToProbe) {
-      probeUrlForServer(s1TargetToProbe, 'server1');
+    if (s1ProbeTargetUrl) {
+      probeUrlForServer(s1ProbeTargetUrl, 'server1');
     }
-    if (s2TargetToProbe) {
-      probeUrlForServer(s2TargetToProbe, 'server2');
+    if (s2ProbeTargetUrl) {
+      probeUrlForServer(s2ProbeTargetUrl, 'server2');
     }
 
     return () => {
       cancelled = true;
     };
-  }, [selectedServer, primaryServerUrl, secondaryServerUrl, primaryServerQualityLinks, secondaryServerQualityLinks]);
+  }, [s1ProbeTargetUrl, s2ProbeTargetUrl]);
 
   // Compute cross-server qualities with [S1] / [S2] badges so both servers' qualities appear in the unified Quality drawer & selector
   const crossServerQualities = useMemo(() => {
