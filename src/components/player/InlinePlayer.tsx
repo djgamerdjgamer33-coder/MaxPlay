@@ -925,10 +925,11 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
   }, [activeVideoUrl]);
 
   const { isIframe, iframeUrl } = useMemo(() => {
-    if (embedFallbackUrl) {
+    const isExtractable = SmartStreamService.isExtractableSource(activeVideoUrl, isSmartHls);
+    if (embedFallbackUrl && !isExtractable) {
       return { isIframe: true, iframeUrl: embedFallbackUrl };
     }
-    if (!activeVideoUrl) return { isIframe: false, iframeUrl: '' };
+    if (!activeVideoUrl || isExtractable) return { isIframe: false, iframeUrl: '' };
     try {
       const urlStr = activeVideoUrl;
       const lower = urlStr.toLowerCase();
@@ -961,7 +962,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
       console.warn("Error parsing iframe url", e);
     }
     return { isIframe: false, iframeUrl: '' };
-  }, [activeVideoUrl, embedFallbackUrl]);
+  }, [activeVideoUrl, embedFallbackUrl, isSmartHls]);
 
   // Sync active video playing state with Native Android PiP Bridge and In-App Miniplayer state
   useEffect(() => {
@@ -1474,8 +1475,14 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
                 return;
               }
 
-              console.warn('fatal network error encountered, try to recover');
-              hls.startLoad();
+              console.warn('fatal network error encountered, checking retry limit');
+              if (networkStruggleCountRef.current < 4) {
+                networkStruggleCountRef.current += 1;
+                hls.startLoad();
+              } else {
+                setIsLoading(false);
+                setPlaybackError('Video stream connection temporarily lost. Please tap Retry.');
+              }
               break;
             }
             case Hls.ErrorTypes.MEDIA_ERROR:

@@ -693,7 +693,10 @@ class InbuiltStreamScraper(
                 pbJson = JSONObject(pbResp.body?.string() ?: "{}")
             }
 
-            val playbackObj = pbJson.optJSONObject("playback") ?: return null
+            val playbackObj = pbJson.optJSONObject("playback") ?: run {
+                byseAttestCache.remove(embedOrigin)
+                return null
+            }
             val sourcesList = mutableListOf<String>()
             var bestHeight = 0
             var bestBitrateKbps = 0

@@ -38,6 +38,7 @@ import { DownloadSelectionModal } from '../../components/downloads/DownloadSelec
 import { downloadManager } from '../../services/DownloadManager';
 import { SmartStreamService } from '../../services/smartStreamService';
 import { ClientHlsDownloader } from '../../services/clientHlsDownloader';
+import { NativeBridgeService } from '../../services/nativeBridgeService';
 import { useAuthContext } from '../../context/AuthContext';
 import { 
   subscribeToMyList, 
@@ -1428,7 +1429,13 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
         for (const [k, v] of Object.entries(src)) {
           const cleanK = k.trim();
           const cleanV = typeof v === 'string' ? SmartStreamService.sanitizeStreamUrl(v) : '';
-          if (cleanK && cleanV && !out[cleanK] && cleanK.toLowerCase() !== 'auto') {
+          const isTempHlsToken =
+            cleanV.includes('/proxy/m3u8') ||
+            cleanV.includes('sprintcdn') ||
+            cleanV.includes('owphbf') ||
+            cleanV.includes('r66nv9ed') ||
+            /[?&](t|token|exp|expires)=/i.test(cleanV);
+          if (cleanK && cleanV && !isTempHlsToken && !out[cleanK] && cleanK.toLowerCase() !== 'auto') {
             out[cleanK] = cleanV;
           }
         }
@@ -1875,27 +1882,33 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
       // If the language already exists on the currently active server (and wasn't explicitly tagged for the other server),
       // keep the current server and switch the audio track directly in-place!
       if (selectedServer === 'server1' && inS1 && !s2TagMatch) {
+        setToastMessage(`Audio • ${cleanLang}`);
+        setTimeout(() => setToastMessage(null), 2000);
         return;
       }
       if (selectedServer === 'server2' && inS2 && !s1TagMatch) {
+        setToastMessage(`Audio • ${cleanLang}`);
+        setTimeout(() => setToastMessage(null), 2000);
         return;
       }
 
       if (selectedServer === 'server1' && hasS2) {
-        if (s2TagMatch || (!inS1 && (inS2 || s1SpecificLanguages.length > 0))) {
+        if (s2TagMatch || (!inS1 && inS2)) {
           handleSelectServer('server2');
           setToastMessage(`Switched to Server 2 • ${cleanLang}${qualBadge}`);
           setTimeout(() => setToastMessage(null), 2800);
           return;
         }
       } else if (selectedServer === 'server2' && hasS1) {
-        if (s1TagMatch || (!inS2 && (inS1 || s2SpecificLanguages.length > 0))) {
+        if (s1TagMatch || (!inS2 && inS1)) {
           handleSelectServer('server1');
           setToastMessage(`Switched to Server 1 • ${cleanLang}${qualBadge}`);
           setTimeout(() => setToastMessage(null), 2800);
           return;
         }
       }
+      setToastMessage(`Audio • ${cleanLang}`);
+      setTimeout(() => setToastMessage(null), 2000);
     },
     [
       playbackPosition,
@@ -2883,8 +2896,8 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
 
           return (
             <InlinePlayer
-              key={`${content.id}-${currentPartKey}`}
-              streamKey={`${content.id}-${currentPartKey}`}
+              key={`${content.id}-${currentPartKey}-${selectedServer}`}
+              streamKey={`${content.id}-${currentPartKey}-${selectedServer}`}
               videoUrl={playerVideoUrl}
               qualityLinks={playerQualityLinks}
               videoSources={playerVideoSources}

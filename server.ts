@@ -1,4 +1,6 @@
 import express from "express";
+import https from "https";
+import dns from "dns";
 import { exec, spawn, execSync } from "child_process";
 import path from "path";
 import fs from "fs";
@@ -515,6 +517,134 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     return { durationSec, sizeMb: 0, bandwidthBps: knownBandwidthBps };
   }
 
+  // Resilient SprintCDN / Byse IP Router: races & caches working IPv4 addresses to bypass cloud ASN blocks
+  const sprintCdnWorkingIpCache = new Map<string, string>();
+
+  async function resilientFetchSprintCdn(targetUrl: string, options: any = {}): Promise<{
+    ok: boolean;
+    status: number;
+    headers: { get(name: string): string | null };
+    text(): Promise<string>;
+    arrayBuffer(): Promise<ArrayBuffer>;
+  }> {
+    let parsed: URL;
+    try {
+      parsed = new URL(targetUrl);
+    } catch {
+      const res = await fetch(targetUrl, options);
+      return {
+        ok: res.ok,
+        status: res.status,
+        headers: res.headers,
+        text: () => res.text(),
+        arrayBuffer: () => res.arrayBuffer()
+      };
+    }
+
+    const hostLower = parsed.hostname.toLowerCase();
+    const isSprint = hostLower.includes("sprintcdn") || hostLower.includes("owphbf") || hostLower.includes("r66nv9ed");
+    if (!isSprint) {
+      const res = await fetch(targetUrl, options);
+      return {
+        ok: res.ok,
+        status: res.status,
+        headers: res.headers,
+        text: () => res.text(),
+        arrayBuffer: () => res.arrayBuffer()
+      };
+    }
+
+    let candidateIps: string[] = [];
+    const cached = sprintCdnWorkingIpCache.get(parsed.hostname);
+    if (cached) {
+      candidateIps.push(cached);
+    }
+    const resolved = await dns.promises.resolve4(parsed.hostname).catch(() => []);
+    for (const ip of resolved) {
+      if (!candidateIps.includes(ip)) candidateIps.push(ip);
+    }
+
+    if (candidateIps.length === 0) {
+      const res = await fetch(targetUrl, options);
+      return {
+        ok: res.ok,
+        status: res.status,
+        headers: res.headers,
+        text: () => res.text(),
+        arrayBuffer: () => res.arrayBuffer()
+      };
+    }
+
+    for (const ip of candidateIps) {
+      try {
+        const responseData = await new Promise<{
+          status: number;
+          headers: Record<string, string | string[] | undefined>;
+          bodyBuf: Buffer;
+        }>((resolve, reject) => {
+          const req = https.request({
+            host: ip,
+            port: 443,
+            servername: parsed.hostname,
+            path: parsed.pathname + parsed.search,
+            method: options.method || "GET",
+            headers: {
+              "Host": parsed.hostname,
+              ...(options.headers || {})
+            },
+            timeout: 3500
+          }, (resp) => {
+            const chunks: Buffer[] = [];
+            resp.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+            resp.on("end", () => {
+              resolve({
+                status: resp.statusCode || 200,
+                headers: resp.headers,
+                bodyBuf: Buffer.concat(chunks)
+              });
+            });
+          });
+          req.on("timeout", () => {
+            req.destroy();
+            reject(new Error(`Timeout on ${ip}`));
+          });
+          req.on("error", (e) => reject(e));
+          if (options.body) req.write(options.body);
+          req.end();
+        });
+
+        sprintCdnWorkingIpCache.set(parsed.hostname, ip);
+        const headersHelper = {
+          get(name: string) {
+            const lower = name.toLowerCase();
+            const val = responseData.headers[lower];
+            if (Array.isArray(val)) return val.join(", ");
+            return typeof val === "string" ? val : null;
+          }
+        };
+
+        return {
+          ok: responseData.status >= 200 && responseData.status < 300,
+          status: responseData.status,
+          headers: headersHelper,
+          text: async () => responseData.bodyBuf.toString("utf8"),
+          arrayBuffer: async () => responseData.bodyBuf.buffer.slice(responseData.bodyBuf.byteOffset, responseData.bodyBuf.byteOffset + responseData.bodyBuf.byteLength)
+        };
+      } catch (ipErr: any) {
+        // Try next IP
+      }
+    }
+
+    const fallbackRes = await fetch(targetUrl, options);
+    return {
+      ok: fallbackRes.ok,
+      status: fallbackRes.status,
+      headers: fallbackRes.headers,
+      text: () => fallbackRes.text(),
+      arrayBuffer: () => fallbackRes.arrayBuffer()
+    };
+  }
+
   async function parseHlsManifestMetadata(
     m3u8Url: string,
     durationSec: number = 0,
@@ -542,19 +672,18 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
         originHeader = new URL(referer).origin;
       } catch {}
 
-      const resp = await fetch(m3u8Url, {
+      const resp = await resilientFetchSprintCdn(m3u8Url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
           'Referer': referer,
           ...(originHeader ? { 'Origin': originHeader } : {}),
           'Accept': '*/*'
-        },
-        signal: AbortSignal.timeout(isSprintEdge ? 2500 : 5000)
+        }
       });
       if (!resp.ok) {
         return {
           qualities: [defaultSingleQ],
-          qualityLinks: { [defaultSingleQ]: originalSourceUrl || m3u8Url },
+          qualityLinks: { [defaultSingleQ]: m3u8Url },
           downloadQualities: [],
           audioTracks: [],
           duration: durationSec || 0
@@ -716,7 +845,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       // Single-quality media playlist handling
       if (qualities.length === 0) {
         qualities.push(defaultSingleQ);
-        qualityLinks[defaultSingleQ] = originalSourceUrl || m3u8Url;
+        qualityLinks[defaultSingleQ] = m3u8Url;
         if (measuredFirstVariantBw > 0) {
           bandwidthsByQuality[defaultSingleQ] = measuredFirstVariantBw;
         }
@@ -784,7 +913,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       console.warn('Error reading HLS manifest stream metadata:', e);
       return {
         qualities: [defaultSingleQ],
-        qualityLinks: { [defaultSingleQ]: originalSourceUrl || m3u8Url },
+        qualityLinks: { [defaultSingleQ]: m3u8Url },
         downloadQualities: [],
         audioTracks: [],
         duration: durationSec || 0
@@ -1540,7 +1669,11 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           const proxiedQualityLinks: Record<string, string> = {};
           if (streamMeta.qualityLinks && typeof streamMeta.qualityLinks === 'object') {
             for (const [q, link] of Object.entries(streamMeta.qualityLinks)) {
-              proxiedQualityLinks[q] = `${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(link)}${refParam}`;
+              if (link && (link.includes('.m3u8') || link.includes('m3u8') || link.includes('master'))) {
+                proxiedQualityLinks[q] = `${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(link)}${refParam}`;
+              } else {
+                proxiedQualityLinks[q] = proxiedMaster;
+              }
             }
           }
           if (Object.keys(proxiedQualityLinks).length === 0) {
@@ -1983,14 +2116,13 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
         originHeader = new URL(referer).origin;
       } catch {}
 
-      const upstream = await fetch(targetUrl, {
+      const upstream = await resilientFetchSprintCdn(targetUrl, {
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           "Referer": referer,
           ...(originHeader ? { "Origin": originHeader } : {}),
           "Accept": "*/*"
-        },
-        signal: AbortSignal.timeout(25000)
+        }
       });
 
       if (!upstream.ok) {
