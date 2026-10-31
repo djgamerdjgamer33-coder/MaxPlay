@@ -5,11 +5,9 @@ import {
   RotateCcw,
   RotateCw,
   ArrowLeft,
-  HelpCircle,
-  Settings2,
-  Cast,
   Maximize,
   Minimize,
+  Maximize2,
   Lock,
   Unlock,
   SkipForward,
@@ -30,6 +28,11 @@ interface PlayerControlsProps {
   currentLanguage?: string;
   playbackRate?: number;
   isLocked?: boolean;
+  videoStretchMode?: 'contain' | 'fill' | 'cover';
+  onToggleStretchMode?: () => void;
+  videoElement?: HTMLVideoElement | null;
+  posterUrl?: string;
+  timeOffset?: number;
   onLockChange?: (locked: boolean) => void;
   onLanguagePress?: () => void;
   onPlayPause: () => void;
@@ -63,6 +66,11 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
   currentLanguage,
   playbackRate = 1.0,
   isLocked: externalIsLocked,
+  videoStretchMode = 'contain',
+  onToggleStretchMode,
+  videoElement,
+  posterUrl,
+  timeOffset = 0,
   onLockChange,
   onPlayPause,
   onSeek,
@@ -72,7 +80,6 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
   onFullscreenToggle,
   onPipToggle,
   onBack,
-  onSettingsPress,
   onQualityPress,
   onLanguagePress,
   onSpeedPress,
@@ -145,11 +152,18 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
 
   if (!isVisible) return null;
 
+  const stretchLabel =
+    videoStretchMode === 'fill'
+      ? 'STRETCH'
+      : videoStretchMode === 'cover'
+      ? 'ZOOM'
+      : 'FIT';
+
   return (
     <div 
       className="absolute inset-0 z-20 flex flex-col justify-between bg-black/45 p-3 sm:p-4 transition-opacity duration-300 select-none pointer-events-none"
     >
-      {/* Top Bar */}
+      {/* Top Bar (Back Button + Video Title only — unused top-right icons removed) */}
       <div className="flex items-center justify-between gap-3 w-full pointer-events-auto">
         <div className={`flex items-center gap-2.5 min-w-0 flex-1 ${!onBack ? 'pl-12' : ''}`}>
           {onBack && (
@@ -178,30 +192,6 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
               {title}
             </span>
           )}
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onSettingsPress?.();
-            }}
-            className="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded-full cursor-pointer transition active:scale-95"
-            title="Settings"
-          >
-            <Settings2 className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-            }}
-            className="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded-full cursor-pointer transition active:scale-95"
-            title="Help"
-          >
-            <HelpCircle className="h-4 w-4" />
-          </button>
         </div>
       </div>
 
@@ -263,21 +253,6 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
         </button>
       </div>
 
-      {/* Next Episode / Part Button positioned independently on the far right */}
-      {onNext && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onNext();
-          }}
-          className="absolute right-4 sm:right-8 top-1/2 -translate-y-1/2 flex h-10 w-10 sm:h-12 sm:w-12 items-center justify-center rounded-full bg-black/50 text-white hover:scale-110 active:scale-90 transition cursor-pointer hover:bg-[#8B5CF6]/50 pointer-events-auto border border-white/20"
-          title="Next Part / Episode"
-        >
-          <SkipForward className="h-5 w-5 sm:h-6 sm:w-6" />
-        </button>
-      )}
-
       {/* Bottom Bar */}
       <div className="flex flex-col gap-1 pointer-events-auto w-full">
         {/* Progress bar */}
@@ -288,6 +263,9 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
             onSeek={onSeek}
             onScrubStart={onScrubStart}
             onScrubEnd={onScrubEnd}
+            videoElement={videoElement}
+            posterUrl={posterUrl}
+            timeOffset={timeOffset}
             skipMarkers={skipMarkers}
           />
         </div>
@@ -298,74 +276,108 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
             <span className="text-white/40 shrink-0">/</span>
             <span className="tabular-nums text-white/70 shrink-0">{duration > 0 ? formatDuration(duration) : '--:--'}</span>
 
-            {/* Playback Speed Badge Button right next to timestamp */}
-            {onSpeedPress && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onSpeedPress();
-                }}
-                className="flex items-center justify-center h-[20px] sm:h-[22px] px-1.5 sm:px-2 ml-0.5 rounded-md bg-white/10 hover:bg-[#8B5CF6]/30 border border-white/20 text-white hover:text-[#C4B5FD] transition cursor-pointer active:scale-95 select-none min-w-[28px] sm:min-w-[34px] shrink-0"
-                title="Change Playback Speed"
-              >
-                <span className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wider text-white leading-none">
-                  {playbackRate === 1.0 ? '1X' : `${playbackRate}X`}
-                </span>
-              </button>
+            {/* FULLSCREEN ONLY: 1X Speed + Next (Series mode) + Stretch Fullscreen Toggle */}
+            {isFullscreen && (
+              <>
+                {onSpeedPress && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSpeedPress();
+                    }}
+                    className="flex items-center justify-center h-[22px] sm:h-[26px] px-2 ml-1 rounded-md bg-white/10 hover:bg-[#8B5CF6]/30 border border-white/20 text-white hover:text-[#C4B5FD] transition cursor-pointer active:scale-95 select-none min-w-[32px] sm:min-w-[36px] shrink-0"
+                    title="Change Playback Speed"
+                  >
+                    <span className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wider text-white leading-none">
+                      {playbackRate === 1.0 ? '1X' : `${playbackRate}X`}
+                    </span>
+                  </button>
+                )}
+
+                {/* Next Episode Button right next to 1X Speed Drawer in Series Mode */}
+                {onNext && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onNext();
+                    }}
+                    className="flex items-center gap-1 h-[22px] sm:h-[26px] px-2 rounded-md bg-[#8B5CF6]/25 hover:bg-[#8B5CF6]/45 border border-[#8B5CF6]/50 text-white transition cursor-pointer active:scale-95 select-none shrink-0"
+                    title="Next Episode"
+                  >
+                    <SkipForward className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-[#C4B5FD] shrink-0" />
+                    <span className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wider text-white leading-none">
+                      Next
+                    </span>
+                  </button>
+                )}
+
+                {/* Fullscreen Video Stretch Button (next to Next in Series mode, or next to 1X in Movie mode) */}
+                {onToggleStretchMode && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleStretchMode();
+                    }}
+                    className={`flex items-center gap-1 h-[22px] sm:h-[26px] px-2 rounded-md border transition cursor-pointer active:scale-95 select-none shrink-0 ${
+                      videoStretchMode !== 'contain'
+                        ? 'bg-[#8B5CF6]/35 border-[#8B5CF6]/70 text-white'
+                        : 'bg-white/10 hover:bg-[#8B5CF6]/30 border-white/20 text-white hover:text-[#C4B5FD]'
+                    }`}
+                    title="Stretch / Fit Video to Fullscreen"
+                  >
+                    <Maximize2 className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-amber-300 shrink-0" />
+                    <span className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wider text-white leading-none">
+                      {stretchLabel}
+                    </span>
+                  </button>
+                )}
+              </>
             )}
           </div>
 
-          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-            {/* TV / Cast Icon (hidden on ultra-narrow portrait screens so Fullscreen never overflows) */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-              }}
-              className="hidden sm:flex p-1 text-white/80 hover:text-white transition cursor-pointer items-center justify-center shrink-0"
-              title="Cast to TV"
-              aria-label="Cast to TV"
-            >
-              <Cast className="h-4 w-4" />
-            </button>
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {/* FULLSCREEN ONLY: Audio Language & Quality Selectors */}
+            {isFullscreen && (
+              <>
+                {onLanguagePress && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onLanguagePress();
+                    }}
+                    className="flex items-center gap-1 h-[22px] sm:h-[26px] px-1.5 sm:px-2 rounded-md bg-white/10 hover:bg-[#8B5CF6]/30 border border-white/20 text-white hover:text-[#C4B5FD] transition cursor-pointer active:scale-95 select-none max-w-[84px] sm:max-w-none shrink-0"
+                    title="Audio Language"
+                  >
+                    <Headphones className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-[#38BDF8] shrink-0" />
+                    <span className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wider text-white leading-none truncate">
+                      {currentLanguage ? currentLanguage.toUpperCase() : 'AUDIO'}
+                    </span>
+                  </button>
+                )}
 
-            {/* Language Selector Button */}
-            {onLanguagePress && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onLanguagePress();
-                }}
-                className="flex items-center gap-1 h-[22px] sm:h-[26px] px-1.5 sm:px-2 rounded-md bg-white/10 hover:bg-[#8B5CF6]/30 border border-white/20 text-white hover:text-[#C4B5FD] transition cursor-pointer active:scale-95 select-none max-w-[74px] sm:max-w-none shrink-0"
-                title="Audio Language"
-              >
-                <Headphones className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-[#38BDF8] shrink-0" />
-                <span className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wider text-white leading-none truncate">
-                  {currentLanguage ? currentLanguage.toUpperCase() : 'AUDIO'}
-                </span>
-              </button>
+                {onQualityPress && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onQualityPress();
+                    }}
+                    className="flex items-center justify-center h-[22px] sm:h-[26px] px-1.5 sm:px-2 rounded-md bg-white/10 hover:bg-[#8B5CF6]/30 border border-white/20 text-white hover:text-[#C4B5FD] transition cursor-pointer active:scale-95 select-none min-w-[38px] sm:min-w-[48px] shrink-0"
+                    title="Switch Quality"
+                  >
+                    <span className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wider text-white leading-none">
+                      {currentQuality ? currentQuality.toUpperCase() : 'AUTO'}
+                    </span>
+                  </button>
+                )}
+              </>
             )}
 
-            {/* Quality Switching Button */}
-            {onQualityPress && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onQualityPress();
-                }}
-                className="flex items-center justify-center h-[22px] sm:h-[26px] px-1.5 sm:px-2 rounded-md bg-white/10 hover:bg-[#8B5CF6]/30 border border-white/20 text-white hover:text-[#C4B5FD] transition cursor-pointer active:scale-95 select-none min-w-[38px] sm:min-w-[48px] shrink-0"
-                title="Switch Quality"
-              >
-                <span className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wider text-white leading-none">
-                  {currentQuality ? currentQuality.toUpperCase() : 'AUTO'}
-                </span>
-              </button>
-            )}
-
-            {/* Picture in Picture Button */}
+            {/* Picture in Picture Button (Visible in both Vertical & Fullscreen) */}
             {onPipToggle && (
               <button
                 type="button"
@@ -373,21 +385,21 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
                   e.stopPropagation();
                   onPipToggle();
                 }}
-                className="p-1 text-white/80 hover:text-white transition cursor-pointer flex items-center justify-center shrink-0"
+                className="p-1 text-white/85 hover:text-white transition cursor-pointer flex items-center justify-center shrink-0"
                 title="Picture in Picture"
               >
                 <PictureInPicture2 className="h-4 w-4" />
               </button>
             )}
 
-            {/* Fullscreen Button */}
+            {/* Fullscreen Button (Visible in both Vertical & Fullscreen) */}
             <button
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 onFullscreenToggle();
               }}
-              className="p-1 text-white/90 hover:text-white transition cursor-pointer flex items-center justify-center shrink-0"
+              className="p-1 text-white/95 hover:text-white transition cursor-pointer flex items-center justify-center shrink-0"
               title="Fullscreen"
             >
               {isFullscreen ? (

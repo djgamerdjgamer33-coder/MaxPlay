@@ -1024,9 +1024,9 @@ export class ClientHlsDownloader {
         jobs.push({ isAudio: true, segIndex: i, url: audioSegments[i] });
       }
 
-      // Continuous sliding-window worker pool (14 parallel workers on Native Disk, 8 on Web)
-      // Saturates user's maximum mobile/Wi-Fi bandwidth without batch stalls
-      const CONCURRENCY = useNativeDisk ? 14 : 8;
+      // Continuous sliding-window worker pool (18 parallel workers on Native Disk, 12 on Web)
+      // Saturates user's maximum mobile/Hotspot/Wi-Fi bandwidth without batch stalls
+      const CONCURRENCY = useNativeDisk ? 18 : 12;
       let nextJobIdx = 0;
 
       const worker = async () => {

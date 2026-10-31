@@ -49,6 +49,7 @@ export const OfflinePlayer: React.FC<OfflinePlayerProps> = ({
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(isExternalFullscreen);
+  const [videoStretchMode, setVideoStretchMode] = useState<'contain' | 'fill' | 'cover'>('contain');
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
 
@@ -551,7 +552,13 @@ export const OfflinePlayer: React.FC<OfflinePlayerProps> = ({
                 );
               }
             }}
-            className="w-full h-full object-contain pointer-events-none"
+            className={`w-full h-full pointer-events-none will-change-transform ${
+              isFullscreen && videoStretchMode === 'fill'
+                ? 'object-fill'
+                : isFullscreen && videoStretchMode === 'cover'
+                ? 'object-cover'
+                : 'object-contain'
+            }`}
           />
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-4 text-center">
@@ -712,6 +719,15 @@ export const OfflinePlayer: React.FC<OfflinePlayerProps> = ({
           duration={duration}
           title={displayTitle}
           isFullscreen={isFullscreen}
+          videoStretchMode={videoStretchMode}
+          onToggleStretchMode={() => {
+            setVideoStretchMode((prev) =>
+              prev === 'contain' ? 'fill' : prev === 'fill' ? 'cover' : 'contain'
+            );
+            resetHideTimer();
+          }}
+          videoElement={videoRef.current}
+          posterUrl={file.posterUrl}
           currentQuality={displayQuality}
           currentLanguage={displayLanguage}
           playbackRate={playbackRate}

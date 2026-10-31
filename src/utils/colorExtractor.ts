@@ -144,6 +144,55 @@ const PRESET_PALETTES: Record<string, PresetCornerPalette> = {
     primary: [245, 158, 11],
     secondary: [220, 38, 38]
   },
+  crunchyroll: {
+    topLeft: [255, 138, 43],    // Vibrant Orange
+    topRight: [234, 88, 12],    // Deep Flame Orange
+    topCenter: [244, 117, 33],  // Crunchyroll Orange
+    primary: [244, 117, 33],
+    secondary: [234, 88, 12]
+  },
+  netflix: {
+    topLeft: [239, 35, 44],     // Crimson Red
+    topRight: [185, 28, 28],    // Deep Ruby
+    topCenter: [229, 9, 20],    // Netflix Red
+    primary: [229, 9, 20],
+    secondary: [185, 28, 28]
+  },
+  prime: {
+    topLeft: [14, 165, 233],    // Sky Blue
+    topRight: [37, 99, 235],    // Royal Blue
+    topCenter: [0, 168, 225],   // Prime Cyan
+    primary: [0, 168, 225],
+    secondary: [37, 99, 235]
+  },
+  disney: {
+    topLeft: [59, 130, 246],    // Royal Blue
+    topRight: [6, 182, 212],    // Electric Cyan
+    topCenter: [37, 99, 235],
+    primary: [59, 130, 246],
+    secondary: [6, 182, 212]
+  },
+  sony: {
+    topLeft: [251, 191, 36],    // Gold
+    topRight: [236, 72, 153],   // Vibrant Pink
+    topCenter: [245, 158, 11],
+    primary: [245, 158, 11],
+    secondary: [236, 72, 153]
+  },
+  hungama: {
+    topLeft: [249, 115, 22],    // Vibrant Orange
+    topRight: [225, 29, 72],    // Rose Red
+    topCenter: [234, 88, 12],
+    primary: [249, 115, 22],
+    secondary: [225, 29, 72]
+  },
+  cartoon: {
+    topLeft: [6, 182, 212],     // Cyan
+    topRight: [236, 72, 153],   // Magenta
+    topCenter: [56, 189, 248],
+    primary: [6, 182, 212],
+    secondary: [236, 72, 153]
+  },
   default: {
     topLeft: [124, 58, 237],    // Violet
     topRight: [236, 72, 153],   // Pink
@@ -152,6 +201,51 @@ const PRESET_PALETTES: Record<string, PresetCornerPalette> = {
     secondary: [236, 72, 153]
   },
 };
+
+export function parseHexColorToRgb(hex?: string): [number, number, number] | null {
+  if (!hex || typeof hex !== 'string') return null;
+  const clean = hex.trim().replace(/^#/, '');
+  if (/^[0-9a-fA-F]{6}$/.test(clean)) {
+    return [
+      parseInt(clean.slice(0, 2), 16),
+      parseInt(clean.slice(2, 4), 16),
+      parseInt(clean.slice(4, 6), 16),
+    ];
+  }
+  if (/^[0-9a-fA-F]{3}$/.test(clean)) {
+    return [
+      parseInt(clean[0] + clean[0], 16),
+      parseInt(clean[1] + clean[1], 16),
+      parseInt(clean[2] + clean[2], 16),
+    ];
+  }
+  return null;
+}
+
+export function buildAmbientPaletteFromRgb(rgb: [number, number, number]): AmbientColorPalette {
+  const primary = boostSaturation(rgb, 0.58);
+  const topLeft: [number, number, number] = [
+    Math.min(255, Math.round(primary[0] * 1.12)),
+    Math.min(255, Math.round(primary[1] * 1.05)),
+    Math.min(255, Math.round(primary[2] * 1.08)),
+  ];
+  const secondary: [number, number, number] = [
+    Math.max(25, Math.round(primary[0] * 0.82)),
+    Math.max(25, Math.round(primary[1] * 0.78)),
+    Math.min(255, Math.round(primary[2] * 1.15)),
+  ];
+  return {
+    primary: `rgb(${primary.join(',')})`,
+    primaryRgb: primary,
+    secondary: `rgb(${secondary.join(',')})`,
+    secondaryRgb: secondary,
+    topLeftRgb: topLeft,
+    topRightRgb: secondary,
+    topCenterRgb: primary,
+    glowTop: `rgba(${primary.join(',')}, 0.92)`,
+    glowHalo: `rgba(${primary.join(',')}, 0.72)`,
+  };
+}
 
 function boostSaturation(rgb: [number, number, number], minSat = 0.52): [number, number, number] {
   let [r, g, b] = rgb;
@@ -260,9 +354,21 @@ function extractRegionColor(
 }
 
 export function getFallbackPalette(genreOrTitle?: string, type?: string, seedUrl?: string): AmbientColorPalette {
+  const customRgb = parseHexColorToRgb(genreOrTitle) || parseHexColorToRgb(type);
+  if (customRgb) {
+    return buildAmbientPaletteFromRgb(customRgb);
+  }
+
   const hint = `${genreOrTitle || ''} ${type || ''} ${seedUrl || ''}`.toLowerCase();
   let presetKey = '';
-  if (hint.includes('action') || hint.includes('war') || hint.includes('fight')) presetKey = 'action';
+  if (hint.includes('crunchyroll') || hint.includes('f47521')) presetKey = 'crunchyroll';
+  else if (hint.includes('netflix') || hint.includes('e50914')) presetKey = 'netflix';
+  else if (hint.includes('prime') || hint.includes('amazon') || hint.includes('00a8e1')) presetKey = 'prime';
+  else if (hint.includes('disney') || hint.includes('hotstar') || hint.includes('jio')) presetKey = 'disney';
+  else if (hint.includes('sony') || hint.includes('yay')) presetKey = 'sony';
+  else if (hint.includes('hungama')) presetKey = 'hungama';
+  else if (hint.includes('cartoon') || hint.includes('pogo') || hint.includes('nick')) presetKey = 'cartoon';
+  else if (hint.includes('action') || hint.includes('war') || hint.includes('fight')) presetKey = 'action';
   else if (hint.includes('sci-fi') || hint.includes('scifi') || hint.includes('space') || hint.includes('cyber')) presetKey = 'scifi';
   else if (hint.includes('horror') || hint.includes('dark') || hint.includes('evil')) presetKey = 'horror';
   else if (hint.includes('romance') || hint.includes('love')) presetKey = 'romance';
@@ -301,6 +407,27 @@ export function extractAmbientPalette(
   genreOrTitle?: string, 
   type?: string
 ): Promise<AmbientColorPalette> {
+  // 0. If an explicit custom hex brand color was passed in genreOrTitle or type, use it directly
+  const explicitRgb = parseHexColorToRgb(genreOrTitle) || parseHexColorToRgb(type);
+  if (explicitRgb) {
+    return Promise.resolve(buildAmbientPaletteFromRgb(explicitRgb));
+  }
+
+  // Known streaming brand preset shortcut for rich, accurate network glow
+  const brandHint = `${genreOrTitle || ''} ${type || ''} ${imageUrl || ''}`.toLowerCase();
+  if (
+    brandHint.includes('crunchyroll') ||
+    brandHint.includes('netflix') ||
+    brandHint.includes('prime') ||
+    brandHint.includes('disney') ||
+    brandHint.includes('hotstar') ||
+    brandHint.includes('sony') ||
+    brandHint.includes('hungama') ||
+    brandHint.includes('cartoon')
+  ) {
+    return Promise.resolve(getFallbackPalette(genreOrTitle, type, imageUrl));
+  }
+
   // 1. Instant check from cache (memory or localStorage)
   const cached = getCachedPalette(imageUrl);
   if (cached) {

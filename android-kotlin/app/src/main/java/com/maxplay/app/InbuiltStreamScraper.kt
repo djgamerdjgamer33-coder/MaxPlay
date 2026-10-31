@@ -74,8 +74,14 @@ class InbuiltStreamScraper(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
         val okHttpClient: OkHttpClient = OkHttpClient.Builder()
+            .dispatcher(okhttp3.Dispatcher().apply {
+                maxRequests = 64
+                maxRequestsPerHost = 32
+            })
+            .connectionPool(okhttp3.ConnectionPool(32, 5, TimeUnit.MINUTES))
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()

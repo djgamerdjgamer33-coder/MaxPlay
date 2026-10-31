@@ -225,6 +225,7 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
   const [currentTime, setCurrentTime] = useState(initialTime);
   const [duration, setDuration] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [videoStretchMode, setVideoStretchMode] = useState<'contain' | 'fill' | 'cover'>('contain');
   const [playbackError, setPlaybackError] = useState<string | null>(null);
 
   // Advanced features states
@@ -1960,8 +1961,14 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
             referrerPolicy="no-referrer"
             ref={videoRef}
             playsInline
-            className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-            style={{ filter: `brightness(${brightness}%)` }}
+            className={`absolute inset-0 w-full h-full pointer-events-none will-change-transform ${
+              isFullscreen && videoStretchMode === 'fill'
+                ? 'object-fill'
+                : isFullscreen && videoStretchMode === 'cover'
+                ? 'object-cover'
+                : 'object-contain'
+            }`}
+            style={{ filter: brightness === 100 ? undefined : `brightness(${brightness}%)`, transform: 'translateZ(0)' }}
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -2255,6 +2262,16 @@ export const InlinePlayer: React.FC<InlinePlayerProps> = ({
             isFullscreen={isFullscreen}
             isLocked={isLocked}
             onLockChange={setIsLocked}
+            videoStretchMode={videoStretchMode}
+            onToggleStretchMode={() => {
+              setVideoStretchMode((prev) =>
+                prev === 'contain' ? 'fill' : prev === 'fill' ? 'cover' : 'contain'
+              );
+              handleControlInteraction();
+            }}
+            videoElement={videoRef.current}
+            posterUrl={posterUrl}
+            timeOffset={timeOffset}
             currentLanguage={currentLanguage}
             currentQuality={currentQuality}
             playbackRate={playbackRate}

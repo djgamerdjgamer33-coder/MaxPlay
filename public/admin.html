@@ -14335,12 +14335,12 @@ docs.forEach(docItem => {
                     </p>
                   </div>
 
-                  <div style="display:flex; align-items:center; gap:8px;">
+                  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                     <button type="button" onclick="quickImportNetworkPresets('${row.id}')" class="btn-secondary" style="background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); color:#FFF; font-size:11px; font-weight:700; padding:7px 12px; border-radius:8px; cursor:pointer; display:flex; align-items:center; gap:6px;">
                       <i class="fa-solid fa-bolt" style="color:#F59E0B;"></i> Quick Import Presets
                     </button>
                     <button type="button" onclick="openNetworkModal('${row.id}')" class="btn-primary" style="background:linear-gradient(135deg, #06B6D4, #8B5CF6); color:#FFF; font-size:11px; font-weight:800; padding:7px 14px; border-radius:8px; border:none; cursor:pointer; display:flex; align-items:center; gap:6px; box-shadow:0 4px 12px rgba(6,182,212,0.3);">
-                      <i class="fa-solid fa-plus"></i> Add Network
+                      <i class="fa-solid fa-plus"></i> Add Custom Icon / Network
                     </button>
                   </div>
                 </div>
@@ -14349,13 +14349,17 @@ docs.forEach(docItem => {
                 <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(135px, 1fr)); gap:12px; margin-top:12px;">
                   ${(row.contentIds && row.contentIds.length > 0) ? row.contentIds.map((net, nIdx) => {
                     const netName = net.name || net.customTitle || 'Network';
-                    const netLogo = net.logoUrl || net.customImage || 'https://via.placeholder.com/150';
+                    const netLogo = net.logoUrl || net.customImage || '';
+                    const netColor = net.brandColor || '#8B5CF6';
                     const itemCount = (net.contentIds || net.collectionIds || []).length;
 
                     return `
-                      <div style="position:relative; background:#121218; border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:10px; display:flex; flex-direction:column; align-items:center; gap:6px; box-shadow:0 4px 12px rgba(0,0,0,0.4); text-align:center;">
-                        <div style="width:52px; height:52px; border-radius:14px; background:#1C1C24; border:1px solid rgba(255,255,255,0.15); display:flex; align-items:center; justify-content:center; overflow:hidden; padding:4px;">
-                          <img src="${netLogo}" style="max-width:100%; max-height:100%; object-fit:contain;" onerror="this.src='https://via.placeholder.com/60'">
+                      <div style="position:relative; background:radial-gradient(circle at 50% 25%, ${netColor}28 0%, #121218 75%); border:1px solid ${netColor}55; border-radius:14px; padding:10px; display:flex; flex-direction:column; align-items:center; gap:6px; box-shadow:0 4px 14px rgba(0,0,0,0.45); text-align:center;">
+                        <div style="width:52px; height:52px; border-radius:14px; background:#1C1C24; border:1px solid ${netColor}66; box-shadow:0 0 16px ${netColor}33; display:flex; align-items:center; justify-content:center; overflow:hidden; padding:4px;">
+                          ${netLogo
+                            ? `<img src="${netLogo}" style="max-width:100%; max-height:100%; object-fit:contain;" onerror="this.src='https://via.placeholder.com/60'">`
+                            : `<span style="font-size:16px; font-weight:900; color:#FFF;">${netName.slice(0, 2).toUpperCase()}</span>`
+                          }
                         </div>
                         <span style="font-size:11px; font-weight:800; color:#FFF; width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${netName}</span>
                         <span style="font-size:9px; font-weight:700; color:#06B6D4; background:rgba(6,182,212,0.15); padding:1px 6px; border-radius:6px;">
@@ -15181,21 +15185,28 @@ docs.forEach(docItem => {
         existingNet = row.contentIds[networkIndex];
       }
 
+      const colorEl = document.getElementById('net-color');
+      const colorHexEl = document.getElementById('net-color-hex');
+
       if (existingNet) {
-        document.getElementById('net-modal-heading').textContent = 'Edit Network Channel / Studio';
+        document.getElementById('net-modal-heading').textContent = 'Edit Custom Icon / Network Studio';
         document.getElementById('net-name').value = existingNet.name || existingNet.customTitle || '';
         document.getElementById('net-logo').value = existingNet.logoUrl || existingNet.customImage || '';
         document.getElementById('net-banner').value = existingNet.bannerUrl || existingNet.backdropImage || '';
         document.getElementById('net-desc').value = existingNet.description || '';
         document.getElementById('net-tag').value = existingNet.tagFilter || '';
+        if (colorEl) colorEl.value = existingNet.brandColor || '#8B5CF6';
+        if (colorHexEl) colorHexEl.value = existingNet.brandColor || '#8B5CF6';
         window.netSelectedItems = [...(existingNet.contentIds || existingNet.collectionIds || [])];
       } else {
-        document.getElementById('net-modal-heading').textContent = 'Add New Network Channel / Studio';
+        document.getElementById('net-modal-heading').textContent = 'Add Custom Icon / Network Channel';
         document.getElementById('net-name').value = '';
         document.getElementById('net-logo').value = '';
         document.getElementById('net-banner').value = '';
         document.getElementById('net-desc').value = '';
         document.getElementById('net-tag').value = '';
+        if (colorEl) colorEl.value = '#8B5CF6';
+        if (colorHexEl) colorHexEl.value = '#8B5CF6';
         window.netSelectedItems = [];
       }
 
@@ -15207,11 +15218,66 @@ docs.forEach(docItem => {
       document.getElementById('network-modal').style.display = 'flex';
     };
 
+    window.setNetworkBrandColor = function(hex) {
+      const cleanHex = (hex || '#8B5CF6').trim();
+      const colorEl = document.getElementById('net-color');
+      const colorHexEl = document.getElementById('net-color-hex');
+      if (colorEl && /^#[0-9A-Fa-f]{6}$/.test(cleanHex)) colorEl.value = cleanHex;
+      if (colorHexEl) colorHexEl.value = cleanHex;
+      window.updateNetworkPreview();
+    };
+
+    window.handleCustomNetworkLogoUpload = function(inputEl) {
+      const file = inputEl && inputEl.files && inputEl.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(evt) {
+        const img = new Image();
+        img.onload = function() {
+          const canvas = document.createElement('canvas');
+          const maxDim = 256;
+          let w = img.width || 256;
+          let h = img.height || 256;
+          if (w > maxDim || h > maxDim) {
+            if (w > h) {
+              h = Math.round((h * maxDim) / w);
+              w = maxDim;
+            } else {
+              w = Math.round((w * maxDim) / h);
+              h = maxDim;
+            }
+          }
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/png', 0.9);
+          document.getElementById('net-logo').value = dataUrl;
+          window.updateNetworkPreview();
+          if (typeof showToast === 'function') showToast('Custom icon image loaded!');
+        };
+        img.src = evt.target.result;
+      };
+      reader.readAsDataURL(file);
+    };
+
     window.updateNetworkPreview = function() {
       const name = document.getElementById('net-name').value;
       const logo = document.getElementById('net-logo').value;
-      document.getElementById('net-preview-name').textContent = name || 'Network Name';
-      document.getElementById('net-preview-img').src = logo || 'https://via.placeholder.com/150/1a1a1a/666666?text=Logo';
+      const colorHexEl = document.getElementById('net-color-hex');
+      const brandColor = (colorHexEl && colorHexEl.value) ? colorHexEl.value.trim() : '#8B5CF6';
+      document.getElementById('net-preview-name').textContent = name || 'Custom Icon Name';
+      document.getElementById('net-preview-img').src = logo || 'https://via.placeholder.com/150/1a1a1a/ffffff?text=' + encodeURIComponent((name || 'MX').slice(0, 2).toUpperCase());
+      const previewCard = document.getElementById('net-preview-card');
+      const previewSquircle = document.getElementById('net-preview-squircle');
+      if (previewCard && /^#[0-9A-Fa-f]{6}$/.test(brandColor)) {
+        previewCard.style.background = `radial-gradient(circle at 20% 50%, ${brandColor}44 0%, rgba(0,0,0,0.45) 75%)`;
+        previewCard.style.borderColor = `${brandColor}66`;
+      }
+      if (previewSquircle && /^#[0-9A-Fa-f]{6}$/.test(brandColor)) {
+        previewSquircle.style.borderColor = `${brandColor}88`;
+        previewSquircle.style.boxShadow = `0 0 22px ${brandColor}55`;
+      }
     };
 
     window.applyPresetToNetworkForm = function(presetId) {
@@ -15222,6 +15288,17 @@ docs.forEach(docItem => {
       document.getElementById('net-banner').value = preset.bannerUrl;
       document.getElementById('net-desc').value = preset.description;
       document.getElementById('net-tag').value = preset.tagFilter;
+      const presetColors = {
+        'net-crunchyroll': '#F47521',
+        'net-netflix': '#E50914',
+        'net-prime': '#00A8E1',
+        'net-disney': '#0063E5',
+        'net-hotstar': '#0F79AF',
+        'net-sonyyay': '#F59E0B',
+        'net-hungama': '#EC4899',
+        'net-cartoonnetwork': '#00AEEF'
+      };
+      window.setNetworkBrandColor(presetColors[presetId] || '#8B5CF6');
       window.updateNetworkPreview();
     };
 
@@ -15337,22 +15414,27 @@ docs.forEach(docItem => {
       }
     };
 
-    window.saveNetworkItem = function() {
+    window.saveNetworkItem = function(keepOpenForNext) {
       const rowId = document.getElementById('net-row-id').value;
       const index = parseInt(document.getElementById('net-item-index').value, 10);
       const name = document.getElementById('net-name').value.trim();
-      const logo = document.getElementById('net-logo').value.trim();
+      let logo = document.getElementById('net-logo').value.trim();
       const banner = document.getElementById('net-banner').value.trim();
       const desc = document.getElementById('net-desc').value.trim();
       const tag = document.getElementById('net-tag').value.trim();
+      const colorHexEl = document.getElementById('net-color-hex');
+      const brandColor = (colorHexEl && colorHexEl.value) ? colorHexEl.value.trim() : '#8B5CF6';
 
       if (!name) {
-        alert("Please enter a Network / Brand Name.");
+        alert("Please enter a Custom Icon / Network Name.");
         return;
       }
+
+      // If user didn't provide an image URL, auto-generate a crisp SVG squircle icon with their brand color & initials
       if (!logo) {
-        alert("Please enter a Network Logo URL.");
-        return;
+        const initials = name.slice(0, 2).toUpperCase();
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200"><defs><radialGradient id="g" cx="50%" cy="35%" r="65%"><stop offset="0%" stop-color="${brandColor}"/><stop offset="100%" stop-color="#12121A"/></radialGradient></defs><rect width="200" height="200" rx="44" fill="url(#g)"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-weight="900" font-size="76">${initials}</text></svg>`;
+        logo = 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
       }
 
       const rows = window.hotScreensData[window.activeHotScreen];
@@ -15362,11 +15444,12 @@ docs.forEach(docItem => {
       if (!row.contentIds) row.contentIds = [];
 
       const networkObj = {
-        id: (index >= 0 && row.contentIds[index]?.id) ? row.contentIds[index].id : ('net_' + Date.now()),
+        id: (index >= 0 && row.contentIds[index]?.id) ? row.contentIds[index].id : ('net_' + Date.now() + '_' + Math.floor(Math.random() * 1000)),
         isNetwork: true,
         name: name,
         logoUrl: logo,
         bannerUrl: banner || logo,
+        brandColor: brandColor,
         description: desc,
         tagFilter: tag || name,
         contentIds: [...window.netSelectedItems]
@@ -15378,10 +15461,16 @@ docs.forEach(docItem => {
         row.contentIds.push(networkObj);
       }
 
-      document.getElementById('network-modal').style.display = 'none';
       window.renderHotRows();
       window.saveDetailedHotScreens();
-      showToast('Network saved successfully!');
+
+      if (keepOpenForNext) {
+        showToast(`Saved "${name}"! Ready to add another custom icon.`);
+        window.openNetworkModal(rowId, -1);
+      } else {
+        document.getElementById('network-modal').style.display = 'none';
+        showToast('Custom Network Icon saved successfully!');
+      }
     };
 
     window.removeHotRowItem = async function(rowId, itemRef) {
@@ -18907,13 +18996,37 @@ docs.forEach(docItem => {
 
           <div style="display:flex; flex-direction:column; gap:12px;">
             <div class="form-group" style="margin:0;">
-              <label style="font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px; display:block;">Network Name *</label>
-              <input type="text" id="net-name" class="form-control" placeholder="e.g. Sony YAY!, Disney Channel, Hungama" style="background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px 12px; color:#FFF; font-size:13px;" oninput="updateNetworkPreview()">
+              <label style="font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px; display:block;">Custom Icon / Network Name *</label>
+              <input type="text" id="net-name" class="form-control" placeholder="e.g. Crunchyroll, My Custom Anime Hub, Sony YAY!" style="background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px 12px; color:#FFF; font-size:13px;" oninput="updateNetworkPreview()">
             </div>
             
             <div class="form-group" style="margin:0;">
-              <label style="font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px; display:block;">Squircle Logo URL *</label>
-              <input type="text" id="net-logo" class="form-control" placeholder="https://... logo image" style="background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px 12px; color:#FFF; font-size:12px;" oninput="updateNetworkPreview()">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <label style="font-size:11px; font-weight:700; color:var(--text-secondary); display:block;">Squircle Icon URL (or Upload Custom Icon)</label>
+                <label style="font-size:10px; font-weight:800; color:#22D3EE; cursor:pointer; background:rgba(6,182,212,0.15); border:1px solid rgba(6,182,212,0.35); padding:2px 8px; border-radius:6px;">
+                  <i class="fa-solid fa-upload"></i> Upload Icon
+                  <input type="file" accept="image/*" style="display:none;" onchange="handleCustomNetworkLogoUpload(this)">
+                </label>
+              </div>
+              <input type="text" id="net-logo" class="form-control" placeholder="https://... or leave blank for auto-initials icon" style="background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px 12px; color:#FFF; font-size:12px;" oninput="updateNetworkPreview()">
+            </div>
+
+            <div class="form-group" style="margin:0;">
+              <label style="font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px; display:block;">Logo Side Fade-Out Glow Color (आजू-बाजू Brand Halo)</label>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <input type="color" id="net-color" value="#8B5CF6" style="width:38px; height:34px; border:1px solid rgba(255,255,255,0.2); border-radius:8px; background:transparent; cursor:pointer; padding:2px;" oninput="setNetworkBrandColor(this.value)">
+                <input type="text" id="net-color-hex" value="#8B5CF6" class="form-control" placeholder="#F47521" style="flex:1; background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px 10px; color:#FFF; font-size:12px; font-family:monospace;" oninput="setNetworkBrandColor(this.value)">
+              </div>
+              <div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap;">
+                <button type="button" onclick="setNetworkBrandColor('#F47521')" title="Crunchyroll Orange" style="width:20px; height:20px; border-radius:50%; background:#F47521; border:1.5px solid rgba(255,255,255,0.5); cursor:pointer;"></button>
+                <button type="button" onclick="setNetworkBrandColor('#E50914')" title="Netflix Red" style="width:20px; height:20px; border-radius:50%; background:#E50914; border:1.5px solid rgba(255,255,255,0.5); cursor:pointer;"></button>
+                <button type="button" onclick="setNetworkBrandColor('#00A8E1')" title="Prime Cyan" style="width:20px; height:20px; border-radius:50%; background:#00A8E1; border:1.5px solid rgba(255,255,255,0.5); cursor:pointer;"></button>
+                <button type="button" onclick="setNetworkBrandColor('#0063E5')" title="Disney Royal Blue" style="width:20px; height:20px; border-radius:50%; background:#0063E5; border:1.5px solid rgba(255,255,255,0.5); cursor:pointer;"></button>
+                <button type="button" onclick="setNetworkBrandColor('#8B5CF6')" title="MaxPlay Purple" style="width:20px; height:20px; border-radius:50%; background:#8B5CF6; border:1.5px solid rgba(255,255,255,0.5); cursor:pointer;"></button>
+                <button type="button" onclick="setNetworkBrandColor('#10B981')" title="Emerald" style="width:20px; height:20px; border-radius:50%; background:#10B981; border:1.5px solid rgba(255,255,255,0.5); cursor:pointer;"></button>
+                <button type="button" onclick="setNetworkBrandColor('#EC4899')" title="Pink Glow" style="width:20px; height:20px; border-radius:50%; background:#EC4899; border:1.5px solid rgba(255,255,255,0.5); cursor:pointer;"></button>
+                <button type="button" onclick="setNetworkBrandColor('#F59E0B')" title="Gold" style="width:20px; height:20px; border-radius:50%; background:#F59E0B; border:1.5px solid rgba(255,255,255,0.5); cursor:pointer;"></button>
+              </div>
             </div>
 
             <div class="form-group" style="margin:0;">
@@ -18932,15 +19045,15 @@ docs.forEach(docItem => {
             </div>
           </div>
 
-          <!-- Live Squircle Preview -->
-          <div style="margin-top:auto; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:12px; display:flex; align-items:center; gap:12px;">
-            <div style="width:54px; height:54px; border-radius:14px; background:#1C1C24; border:1px solid rgba(255,255,255,0.15); display:flex; align-items:center; justify-content:center; overflow:hidden; padding:4px; flex-shrink:0;">
+          <!-- Live Squircle Preview with Ambient Halo -->
+          <div id="net-preview-card" style="margin-top:auto; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:12px; display:flex; align-items:center; gap:12px; transition:all 0.25s;">
+            <div id="net-preview-squircle" style="width:54px; height:54px; border-radius:14px; background:#1C1C24; border:1px solid rgba(255,255,255,0.15); display:flex; align-items:center; justify-content:center; overflow:hidden; padding:4px; flex-shrink:0; transition:all 0.25s;">
               <img id="net-preview-img" src="" style="max-width:100%; max-height:100%; object-fit:contain;" onerror="this.src='https://via.placeholder.com/60'">
             </div>
             <div style="display:flex; flex-direction:column; overflow:hidden;">
-              <span style="font-size:9px; font-weight:800; color:#06B6D4; text-transform:uppercase;">Squircle Preview</span>
+              <span style="font-size:9px; font-weight:800; color:#06B6D4; text-transform:uppercase;">Custom Icon + Halo Preview</span>
               <span id="net-preview-name" style="font-size:13px; font-weight:800; color:#FFF; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Network Name</span>
-              <span style="font-size:10px; color:#A1A1AA;">Opens detail hub page</span>
+              <span style="font-size:10px; color:#A1A1AA;">Opens detail hub with side color fade</span>
             </div>
           </div>
 
@@ -18956,7 +19069,7 @@ docs.forEach(docItem => {
               <button type="button" id="net-tab-all" onclick="setNetworkContentTab('all')" style="background:linear-gradient(135deg, #06B6D4, #8B5CF6); color:#FFF; border:none; padding:6px 14px; border-radius:8px; font-size:12px; font-weight:800; cursor:pointer;">
                 <i class="fa-solid fa-border-all"></i> All Titles
               </button>
-              <button type="button" id="net-tab-movies" onclick="setNetworkContentTab('movies')" style="background:rgba(255,255,255,0.06); color:var(--text-secondary); border:1px solid rgba(255,255,255,0.1); padding:6px 14px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">
+              <button type="button" id="net-tab-movies" onclick="setNetworkContentTab('movies')" style="background:rgba(255,255,255,255,0.06); color:var(--text-secondary); border:1px solid rgba(255,255,255,0.1); padding:6px 14px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">
                 <i class="fa-solid fa-film"></i> Movies Tab
               </button>
               <button type="button" id="net-tab-series" onclick="setNetworkContentTab('series')" style="background:rgba(255,255,255,0.06); color:var(--text-secondary); border:1px solid rgba(255,255,255,0.1); padding:6px 14px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;">
@@ -18984,13 +19097,18 @@ docs.forEach(docItem => {
       </div>
 
       <!-- Footer Action -->
-      <div style="padding:14px 24px; border-top:1px solid rgba(255,255,255,0.08); display:flex; justify-content:space-between; align-items:center; background:var(--bg-tertiary);">
+      <div style="padding:14px 24px; border-top:1px solid rgba(255,255,255,0.08); display:flex; justify-content:space-between; align-items:center; background:var(--bg-tertiary); flex-wrap:wrap; gap:10px;">
         <span style="font-size:12px; color:var(--text-tertiary);">
-          <i class="fa-solid fa-circle-info" style="color:#06B6D4;"></i> Titles selected will appear in the client app under All, Movies, or Series tabs.
+          <i class="fa-solid fa-circle-info" style="color:#06B6D4;"></i> Create 1, 2, or unlimited custom icons. Selected titles appear under All, Movies & Series tabs.
         </span>
-        <button type="button" class="btn-primary" onclick="saveNetworkItem()" style="background:linear-gradient(135deg, #06B6D4, #8B5CF6); color:#FFF; font-size:13px; font-weight:800; padding:10px 28px; border-radius:10px; border:none; cursor:pointer; box-shadow:0 4px 15px rgba(6,182,212,0.4); transition:all 0.2s;">
-          Save Network Channel
-        </button>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <button type="button" onclick="saveNetworkItem(true)" style="background:rgba(139,92,246,0.2); border:1px solid rgba(139,92,246,0.5); color:#C4B5FD; font-size:12px; font-weight:800; padding:10px 18px; border-radius:10px; cursor:pointer; transition:all 0.2s;">
+            <i class="fa-solid fa-plus"></i> Save & Add Another Icon
+          </button>
+          <button type="button" class="btn-primary" onclick="saveNetworkItem(false)" style="background:linear-gradient(135deg, #06B6D4, #8B5CF6); color:#FFF; font-size:13px; font-weight:800; padding:10px 28px; border-radius:10px; border:none; cursor:pointer; box-shadow:0 4px 15px rgba(6,182,212,0.4); transition:all 0.2s;">
+            Save Custom Icon
+          </button>
+        </div>
       </div>
 
     </div>

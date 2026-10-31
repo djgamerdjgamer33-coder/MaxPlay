@@ -26,10 +26,9 @@ export const NetworkDetailScreen: React.FC<NetworkDetailScreenProps> = ({
   const [palette, setPalette] = useState<AmbientColorPalette | null>(null);
 
   React.useEffect(() => {
-    if (network.logoUrl || network.bannerUrl) {
-      extractAmbientPalette(network.logoUrl || network.bannerUrl || '').then(setPalette);
-    }
-  }, [network.logoUrl, network.bannerUrl]);
+    const targetImg = network.logoUrl || network.bannerUrl || '';
+    extractAmbientPalette(targetImg, network.brandColor || network.name, network.name).then(setPalette);
+  }, [network.logoUrl, network.bannerUrl, network.brandColor, network.name]);
 
   // Resolve content items assigned or matched to this network
   const allNetworkItems = useMemo(() => {
@@ -120,9 +119,13 @@ export const NetworkDetailScreen: React.FC<NetworkDetailScreenProps> = ({
   const logoUrl = network.logoUrl || network.bannerUrl || 'https://via.placeholder.com/300';
   const bannerUrl = network.bannerUrl || network.logoUrl || 'https://images.unsplash.com/photo-1578632767115-351597cf2477?w=1200';
   const glowColor = palette ? palette.primary : '#8B5CF6';
+  const primaryRgbStr = palette ? palette.primaryRgb.join(',') : '139, 92, 246';
+  const secondaryRgbStr = palette ? palette.secondaryRgb.join(',') : '6, 182, 212';
+  const topLeftRgbStr = palette ? palette.topLeftRgb.join(',') : primaryRgbStr;
+  const topRightRgbStr = palette ? palette.topRightRgb.join(',') : secondaryRgbStr;
 
   return (
-    <div className="absolute inset-0 z-[60] flex h-full w-full flex-col overflow-x-hidden bg-[#0A0A0E] text-left select-none pb-20 md:pb-8">
+    <div className="absolute inset-0 z-[60] flex h-full w-full flex-col overflow-x-hidden bg-[#0A0A0E] text-left select-none">
       {/* Sticky Header Bar */}
       <header className="flex-none flex items-center justify-between px-4 py-3 bg-[#0A0A0E]/90 backdrop-blur-xl border-b border-white/10 shadow-lg z-50">
         <div className="flex items-center gap-3">
@@ -162,7 +165,7 @@ export const NetworkDetailScreen: React.FC<NetworkDetailScreenProps> = ({
       </header>
 
       {/* NEW SCROLLABLE CONTAINER */}
-      <div className="flex-1 overflow-y-auto scrollbar-none w-full">
+      <div className="flex-1 overflow-y-auto scrollbar-none w-full pb-8">
         {/* Expandable Search Input Bar */}
         {showSearch && (
           <div className="px-4 py-2.5 bg-[#121218] border-b border-white/10 transition-all duration-200">
@@ -189,11 +192,14 @@ export const NetworkDetailScreen: React.FC<NetworkDetailScreenProps> = ({
           </div>
         )}
 
-        {/* Network Hero Showcase Banner */}
+        {/* Network Hero Showcase Banner with Enhanced Multi-Directional Logo Color Fade-Out (आजू-बाजू) */}
         <div 
-          className="relative w-full overflow-hidden pb-6 pt-4 px-4 border-b border-white/5 transition-colors duration-700"
+          className="relative w-full overflow-hidden pb-7 pt-5 px-4 border-b border-white/5 transition-colors duration-700"
           style={{
-            background: `linear-gradient(to bottom, ${palette ? `rgba(${palette.primaryRgb.join(',')}, 0.15)` : '#181822'}, #0A0A0E)`
+            background: `
+              radial-gradient(ellipse 92% 72% at 50% 24%, rgba(${primaryRgbStr}, 0.34) 0%, rgba(${secondaryRgbStr}, 0.16) 52%, rgba(10, 10, 14, 0) 100%),
+              linear-gradient(to bottom, rgba(${primaryRgbStr}, 0.24), #0A0A0E)
+            `
           }}
         >
           {/* Subtle Backdrop Image Glow */}
@@ -202,28 +208,52 @@ export const NetworkDetailScreen: React.FC<NetworkDetailScreenProps> = ({
             <div className="absolute inset-0 bg-gradient-to-t from-[#0A0A0E] via-[#0A0A0E]/80 to-transparent" />
           </div>
 
-          {/* Color matching fade effect behind logo */}
-          <div 
-            className="absolute top-4 left-1/2 -translate-x-1/2 sm:left-24 sm:translate-x-0 w-[160px] h-[160px] rounded-full blur-[60px] opacity-40 pointer-events-none transition-all duration-700"
-            style={{ background: palette ? palette.primary : '#8B5CF6' }}
-          />
-
           <div className="relative z-10 flex flex-col sm:flex-row items-center sm:items-start gap-4 sm:gap-6 max-w-4xl mx-auto">
-          {/* Main Logo Squircle Card */}
-          <div 
-            className="relative h-24 w-24 sm:h-28 sm:w-28 rounded-3xl p-3 bg-gradient-to-b from-[#242432] to-[#12121A] border-2 border-white/20 shrink-0 flex items-center justify-center transition-all duration-500"
-            style={{ boxShadow: `0 8px 30px ${palette ? palette.glowHalo : 'rgba(139,92,246,0.3)'}` }}
-          >
-            <img
-              src={logoUrl || undefined}
-              alt={network.name}
-              className="max-h-full max-w-full object-contain filter drop-shadow-[0_4px_12px_rgba(0,0,0,0.8)]"
+          {/* Main Logo Squircle Card with Multi-Layered Left/Right/Center Color Fade-Out (आजू-बाजू) */}
+          <div className="relative flex items-center justify-center shrink-0">
+            {/* Wide Horizontal Left-Right Brand Color Fade-Out Halo (आजू-बाजू) */}
+            <div
+              className="pointer-events-none absolute -inset-x-20 -inset-y-8 rounded-full blur-3xl opacity-80 transition-all duration-700"
+              style={{
+                background: `radial-gradient(ellipse at center, rgba(${primaryRgbStr}, 0.88) 0%, rgba(${secondaryRgbStr}, 0.48) 46%, transparent 78%)`,
+              }}
             />
+            {/* Left Wing Ambient Color Aura */}
+            <div
+              className="pointer-events-none absolute -left-12 top-1/2 -translate-y-1/2 h-24 w-24 rounded-full blur-2xl opacity-75 transition-all duration-700"
+              style={{ backgroundColor: `rgb(${topLeftRgbStr})` }}
+            />
+            {/* Right Wing Ambient Color Aura */}
+            <div
+              className="pointer-events-none absolute -right-12 top-1/2 -translate-y-1/2 h-24 w-24 rounded-full blur-2xl opacity-75 transition-all duration-700"
+              style={{ backgroundColor: `rgb(${topRightRgbStr})` }}
+            />
+            {/* Intense Core Backlight Ring Behind Squircle */}
+            <div
+              className="pointer-events-none absolute -inset-3 rounded-[30px] blur-xl opacity-80 transition-all duration-700"
+              style={{
+                background: `linear-gradient(135deg, rgba(${topLeftRgbStr}, 0.92), rgba(${primaryRgbStr}, 0.78), rgba(${topRightRgbStr}, 0.92))`,
+              }}
+            />
+
             <div 
-              className="absolute -bottom-2 -right-2 rounded-full p-1 shadow-lg"
-              style={{ background: `linear-gradient(to right, ${glowColor}, #06B6D4)` }}
+              className="relative h-24 w-24 sm:h-28 sm:w-28 rounded-3xl p-3 bg-gradient-to-b from-[#242432] to-[#12121A] shrink-0 flex items-center justify-center transition-all duration-500"
+              style={{
+                boxShadow: `0 14px 42px -4px rgba(${primaryRgbStr}, 0.65), 0 0 26px 2px rgba(${secondaryRgbStr}, 0.38)`,
+                border: `1.5px solid rgba(${primaryRgbStr}, 0.65)`,
+              }}
             >
-              <CheckCircle2 className="h-4 w-4 text-white" />
+              <img
+                src={logoUrl || undefined}
+                alt={network.name}
+                className="max-h-full max-w-full object-contain filter drop-shadow-[0_4px_12px_rgba(0,0,0,0.8)]"
+              />
+              <div 
+                className="absolute -bottom-2 -right-2 rounded-full p-1 shadow-lg"
+                style={{ background: `linear-gradient(to right, ${glowColor}, #06B6D4)` }}
+              >
+                <CheckCircle2 className="h-4 w-4 text-white" />
+              </div>
             </div>
           </div>
 

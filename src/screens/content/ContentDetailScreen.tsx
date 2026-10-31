@@ -863,10 +863,19 @@ export const ContentDetailScreen: React.FC<ContentDetailScreenProps> = ({
       }
     };
 
-    setPartProgressMap(updatedPartMap);
-    setPlaybackPosition(actualTime);
+    // Always keep stateRefs up to date immediately for instant read access without re-rendering
+    curState.partProgressMap = updatedPartMap;
+    curState.playbackPosition = actualTime;
 
     const now = Date.now();
+    const isPlayerFullscreen = Boolean((window as any).__isMaxPlayPlayerFullscreen);
+    // Avoid triggering 4,300-line ContentDetailScreen React re-renders every 1.5s during active playback
+    // especially when in fullscreen mode (where ContentDetailScreen UI is completely hidden behind the player)
+    if (forceSave || isFinished || (!isPlayerFullscreen && now - lastSaveTimeRef.current >= 5000)) {
+      setPartProgressMap(updatedPartMap);
+      setPlaybackPosition(actualTime);
+    }
+
     let shouldSyncCloud = forceSave || isFinished || (now - lastSaveTimeRef.current >= 5000);
 
     // ANTI-OVERWRITE PROTECTION (Ultra Pro Max Safe Guard):

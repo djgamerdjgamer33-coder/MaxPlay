@@ -158,6 +158,7 @@ export interface NetworkItem {
   name: string;
   logoUrl: string;
   bannerUrl?: string;
+  brandColor?: string;
   description?: string;
   contentIds?: string[];
   movieIds?: string[];

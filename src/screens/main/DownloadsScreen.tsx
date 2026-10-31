@@ -17,6 +17,7 @@ import {
   Wifi,
   Play,
   Copy,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   doc,
@@ -61,6 +62,21 @@ interface DirectTransferSession {
   storageKey: string;
   videoUrl?: string;
   secondaryVideoUrl?: string;
+  batchItems?: Array<{
+    contentId?: string;
+    episodeId?: string;
+    seasonIndex?: number;
+    episodeIndex?: number;
+    title: string;
+    subtitle?: string;
+    posterUrl?: string;
+    quality?: string;
+    language?: string;
+    fileSizeMb: number;
+    storageKey: string;
+    videoUrl?: string;
+    secondaryVideoUrl?: string;
+  }>;
   status: 'waiting' | 'transferring' | 'completed';
   progress?: number;
   createdAt: number;
@@ -77,6 +93,7 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [transferTab, setTransferTab] = useState<'send' | 'receive'>('send');
   const [selectedSendFileId, setSelectedSendFileId] = useState<string | null>(null);
+  const [selectedSendFileIds, setSelectedSendFileIds] = useState<string[]>([]);
 
   // Direct App-to-App Transfer States
   const [activeSendSession, setActiveSendSession] = useState<DirectTransferSession | null>(null);
@@ -453,16 +470,74 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
   // ============================================================================
   // DIRECT APP-TO-APP TRANSFER (MaxPlay -> MaxPlay with 6-Digit Code & Live P2P)
   // ============================================================================
-  const handleStartDirectSendSession = async (file: DownloadedFile) => {
+  const toggleSelectSendFile = (fileId: string) => {
+    setSelectedSendFileIds((prev) =>
+      prev.includes(fileId) ? prev.filter((id) => id !== fileId) : [...prev, fileId]
+    );
+  };
+
+  const resolveFileTransferUrls = (file: DownloadedFile) => {
+    let resolvedVideoUrl = file.videoUrl || '';
+    let resolvedSecondaryUrl = (file as any).secondaryVideoUrl || '';
+    const targetQ = (file.quality || '720p').toLowerCase();
+    if (file.contentId) {
+      const catItem = contentList.find((c) => c.id === file.contentId);
+      if (catItem) {
+        const pickFromQualityDict = (dict?: Record<string, string>) => {
+          if (!dict || typeof dict !== 'object') return '';
+          for (const [k, v] of Object.entries(dict)) {
+            if (k.toLowerCase() === targetQ && typeof v === 'string' && v.trim()) return v.trim();
+          }
+          const first = Object.values(dict).find((v) => typeof v === 'string' && v.trim());
+          return first ? first.trim() : '';
+        };
+
+        const seasonsArr = (catItem as any).seasonsData || (catItem as any).seasons;
+        if (
+          file.episodeIndex !== undefined &&
+          (Array.isArray(seasonsArr) || Array.isArray((catItem as any).episodesList))
+        ) {
+          const sIdx = file.seasonIndex || 0;
+          const ep =
+            (Array.isArray(seasonsArr) && seasonsArr[sIdx]?.episodes?.[file.episodeIndex]) ||
+            (Array.isArray((catItem as any).episodesList) &&
+              (catItem as any).episodesList[file.episodeIndex]);
+          if (ep) {
+            resolvedVideoUrl =
+              pickFromQualityDict(ep.qualityLinks) || ep.videoUrl || resolvedVideoUrl;
+            resolvedSecondaryUrl =
+              pickFromQualityDict(
+                (ep as any).secondaryServerQualityLinks || (ep as any).secondaryQualityLinks
+              ) ||
+              (ep as any).secondaryVideoUrl ||
+              resolvedSecondaryUrl;
+          }
+        } else {
+          resolvedVideoUrl =
+            pickFromQualityDict(catItem.qualityLinks) || catItem.videoUrl || resolvedVideoUrl;
+          resolvedSecondaryUrl =
+            pickFromQualityDict(
+              (catItem as any).secondaryServerQualityLinks || catItem.secondaryQualityLinks
+            ) ||
+            (catItem as any).secondaryVideoUrl ||
+            resolvedSecondaryUrl;
+        }
+      }
+    }
+    return { resolvedVideoUrl, resolvedSecondaryUrl };
+  };
+
+  const handleStartDirectSendSession = async (fileOrFiles: DownloadedFile | DownloadedFile[]) => {
     try {
-      // Verify file still exists in completedFiles (not deleted)
+      const requestedList = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
       const latestCompleted = downloadManager.getCompletedFiles();
-      const stillExists = latestCompleted.some(
-        (f) => f.id === file.id && f.category !== 'local'
+      const validFiles = requestedList.filter((reqFile) =>
+        latestCompleted.some((f) => f.id === reqFile.id && f.category !== 'local' && !f.hasError)
       );
-      if (!stillExists) {
+
+      if (validFiles.length === 0) {
         setCompletedFiles(latestCompleted);
-        triggerToast('This file was already deleted and cannot be sent.');
+        triggerToast('Selected file(s) were deleted or are unavailable to send.');
         return;
       }
 
@@ -471,75 +546,58 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
         sendSessionUnsubRef.current = null;
       }
 
-      setSelectedSendFileId(file.id);
+      const primaryFile = validFiles[0];
+      setSelectedSendFileId(primaryFile.id);
       const code = String(Math.floor(100000 + Math.random() * 900000));
 
-      // Resolve catalog source URLs (including qualityLinks & Server 2) so universal fallback also has the exact quality link
-      let resolvedVideoUrl = file.videoUrl || '';
-      let resolvedSecondaryUrl = (file as any).secondaryVideoUrl || '';
-      const targetQ = (file.quality || '720p').toLowerCase();
-      if (file.contentId) {
-        const catItem = contentList.find((c) => c.id === file.contentId);
-        if (catItem) {
-          const pickFromQualityDict = (dict?: Record<string, string>) => {
-            if (!dict || typeof dict !== 'object') return '';
-            for (const [k, v] of Object.entries(dict)) {
-              if (k.toLowerCase() === targetQ && typeof v === 'string' && v.trim()) return v.trim();
-            }
-            const first = Object.values(dict).find((v) => typeof v === 'string' && v.trim());
-            return first ? first.trim() : '';
-          };
+      const batchItems = validFiles.map((f) => {
+        const { resolvedVideoUrl, resolvedSecondaryUrl } = resolveFileTransferUrls(f);
+        const epTag = f.episodeIndex !== undefined ? ` • Ep ${f.episodeIndex + 1}` : '';
+        return {
+          contentId: f.contentId || '',
+          episodeId: f.episodeId || '',
+          seasonIndex: f.seasonIndex,
+          episodeIndex: f.episodeIndex,
+          title: f.title,
+          subtitle: f.subtitle || (epTag ? `Episode ${(f.episodeIndex || 0) + 1}` : ''),
+          posterUrl: f.posterUrl || '',
+          quality: f.quality || '720p',
+          language: f.language || 'Default',
+          fileSizeMb: Math.max(1, f.fileSizeMb || 50),
+          storageKey: f.storageKey || `dl_${f.id}`,
+          videoUrl: resolvedVideoUrl,
+          secondaryVideoUrl: resolvedSecondaryUrl,
+        };
+      });
 
-          const seasonsArr = (catItem as any).seasonsData || (catItem as any).seasons;
-          if (file.episodeIndex !== undefined && (Array.isArray(seasonsArr) || Array.isArray((catItem as any).episodesList))) {
-            const sIdx = file.seasonIndex || 0;
-            const ep =
-              (Array.isArray(seasonsArr) && seasonsArr[sIdx]?.episodes?.[file.episodeIndex]) ||
-              (Array.isArray((catItem as any).episodesList) && (catItem as any).episodesList[file.episodeIndex]);
-            if (ep) {
-              resolvedVideoUrl =
-                pickFromQualityDict(ep.qualityLinks) ||
-                ep.videoUrl ||
-                resolvedVideoUrl;
-              resolvedSecondaryUrl =
-                pickFromQualityDict((ep as any).secondaryServerQualityLinks || (ep as any).secondaryQualityLinks) ||
-                (ep as any).secondaryVideoUrl ||
-                resolvedSecondaryUrl;
-            }
-          } else {
-            resolvedVideoUrl =
-              pickFromQualityDict(catItem.qualityLinks) ||
-              catItem.videoUrl ||
-              resolvedVideoUrl;
-            resolvedSecondaryUrl =
-              pickFromQualityDict((catItem as any).secondaryServerQualityLinks || catItem.secondaryQualityLinks) ||
-              (catItem as any).secondaryVideoUrl ||
-              resolvedSecondaryUrl;
-          }
-        }
-      }
+      const totalBatchSizeMb =
+        Math.round(batchItems.reduce((acc, item) => acc + (item.fileSizeMb || 50), 0) * 10) / 10;
+      const sessionDisplayTitle =
+        batchItems.length > 1
+          ? `${primaryFile.title} (+${batchItems.length - 1} more • ${batchItems.length} videos)`
+          : primaryFile.title;
 
       const metadataPayload = {
-        id: file.id,
-        storageKey: file.storageKey || `dl_${file.contentId || file.id}`,
-        contentId: file.contentId || '',
-        title: file.title,
-        subtitle: file.subtitle || '',
-        posterUrl: file.posterUrl || '',
-        quality: file.quality || '720p',
-        language: file.language || 'Default',
-        fileSizeMb: file.fileSizeMb || 50,
-        episodeId: file.episodeId || '',
-        seasonIndex: file.seasonIndex ?? 0,
-        episodeIndex: file.episodeIndex,
+        id: primaryFile.id,
+        storageKey: primaryFile.storageKey || `dl_${primaryFile.contentId || primaryFile.id}`,
+        contentId: primaryFile.contentId || '',
+        title: sessionDisplayTitle,
+        subtitle: primaryFile.subtitle || '',
+        posterUrl: primaryFile.posterUrl || '',
+        quality: primaryFile.quality || '720p',
+        language: primaryFile.language || 'Default',
+        fileSizeMb: totalBatchSizeMb,
+        episodeId: primaryFile.episodeId || '',
+        seasonIndex: primaryFile.seasonIndex ?? 0,
+        episodeIndex: primaryFile.episodeIndex,
       };
 
       // Start Native LAN P2P HTTP Server on Sender phone (port 48821) if running in APK
       let senderIp = '';
       let senderPort = 48821;
-      if (file.storageKey && NativeBridgeService.isRunningInKotlinApp()) {
+      if (primaryFile.storageKey && NativeBridgeService.isRunningInKotlinApp()) {
         const serverRes = NativeBridgeService.startDirectTransferServerNative(
-          file.storageKey,
+          primaryFile.storageKey,
           code,
           metadataPayload
         );
@@ -553,19 +611,20 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
         code,
         senderIp,
         senderPort,
-        contentId: file.contentId || '',
-        episodeId: file.episodeId || '',
-        seasonIndex: file.seasonIndex,
-        episodeIndex: file.episodeIndex,
-        title: file.title,
-        subtitle: file.subtitle || '',
-        posterUrl: file.posterUrl || '',
-        quality: file.quality || '720p',
-        language: file.language || 'Default',
-        fileSizeMb: file.fileSizeMb || 50,
-        storageKey: file.storageKey || `dl_${file.id}`,
-        videoUrl: resolvedVideoUrl,
-        secondaryVideoUrl: resolvedSecondaryUrl,
+        contentId: primaryFile.contentId || '',
+        episodeId: primaryFile.episodeId || '',
+        seasonIndex: primaryFile.seasonIndex,
+        episodeIndex: primaryFile.episodeIndex,
+        title: sessionDisplayTitle,
+        subtitle: primaryFile.subtitle || '',
+        posterUrl: primaryFile.posterUrl || '',
+        quality: primaryFile.quality || '720p',
+        language: primaryFile.language || 'Default',
+        fileSizeMb: totalBatchSizeMb,
+        storageKey: batchItems[0].storageKey,
+        videoUrl: batchItems[0].videoUrl,
+        secondaryVideoUrl: batchItems[0].secondaryVideoUrl,
+        batchItems,
         status: 'waiting',
         progress: 0,
         createdAt: Date.now(),
@@ -584,29 +643,33 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
         setActiveSendSession(data);
         if (data.status === 'transferring') {
           const pct = Math.min(99, Math.max(1, data.progress || 10));
-          const totalMb = data.fileSizeMb || file.fileSizeMb || 50;
+          const totalMb = data.fileSizeMb || totalBatchSizeMb || 50;
           const sentMb = Math.round(((totalMb * pct) / 100) * 10) / 10;
           setTransferStatus({
             active: true,
             mode: 'send',
             progress: pct,
-            message: `Sending "${file.title}" to Receiver (${sentMb} MB / ${totalMb} MB • ${pct}%)`,
+            message: `Sending ${batchItems.length > 1 ? `${batchItems.length} videos` : `"${primaryFile.title}"`} (${sentMb} MB / ${totalMb} MB • ${pct}%)`,
           });
         } else if (data.status === 'completed') {
           setTransferStatus({
             active: true,
             mode: 'send',
             progress: 100,
-            message: `100% Sent! "${file.title}" delivered to Receiver MaxPlay.`,
+            message: `100% Sent! ${batchItems.length > 1 ? `All ${batchItems.length} videos` : `"${primaryFile.title}"`} delivered to Receiver MaxPlay.`,
           });
           setTimeout(() => {
             setTransferStatus(null);
           }, 2200);
-          triggerToast(`100% Sent! Direct Transfer of "${file.title}" completed!`);
+          triggerToast(
+            `100% Sent! Direct Transfer of ${batchItems.length > 1 ? `${batchItems.length} videos` : `"${primaryFile.title}"`} completed!`
+          );
         }
       });
 
-      triggerToast(`Direct Transfer ready! Enter code ${code} on the Receiver MaxPlay app.`);
+      triggerToast(
+        `Direct Transfer ready (${batchItems.length} ${batchItems.length === 1 ? 'video' : 'videos'})! Enter code ${code} on Receiver.`
+      );
     } catch (err) {
       console.error('Failed to start direct transfer session:', err);
       triggerToast('Could not start transfer session. Check connection.');
@@ -631,236 +694,284 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
     activeReceiveCodeRef.current = cleanCode;
 
     try {
-      const deterministicSuffix = session.contentId
-        ? `${session.contentId}_s${session.seasonIndex ?? 0}_e${session.episodeIndex ?? 0}`
-        : (session.title || cleanCode).toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-      const targetStorageKey = session.storageKey || `dl_recv_${deterministicSuffix}`;
-      const expectedTotalMb = Math.max(1, session.fileSizeMb || 50);
+      const itemsToReceive =
+        Array.isArray(session.batchItems) && session.batchItems.length > 0
+          ? session.batchItems
+          : [
+              {
+                contentId: session.contentId,
+                episodeId: session.episodeId,
+                seasonIndex: session.seasonIndex,
+                episodeIndex: session.episodeIndex,
+                title: session.title,
+                subtitle: session.subtitle,
+                posterUrl: session.posterUrl,
+                quality: session.quality,
+                language: session.language,
+                fileSizeMb: session.fileSizeMb,
+                storageKey: session.storageKey,
+                videoUrl: session.videoUrl,
+                secondaryVideoUrl: session.secondaryVideoUrl,
+              },
+            ];
 
-      setTransferStatus({
-        active: true,
-        mode: 'receive',
-        progress: 6,
-        message: `Connecting to Sender MaxPlay for "${session.title}" (6%)...`,
-      });
-
+      const totalBatchItems = itemsToReceive.length;
       const sessionRef = doc(db, 'downloads', 'p2p_sessions', 'tasks', cleanCode);
       try {
-        await setDoc(sessionRef, { ...session, status: 'transferring', progress: 8 }, { merge: true });
+        await setDoc(sessionRef, { ...session, status: 'transferring', progress: 5 }, { merge: true });
       } catch {}
 
-      let transferredOk = false;
-      let transferredBytes = expectedTotalMb * 1024 * 1024;
       let lastFirestoreSyncTime = 0;
-      let lastFirestorePct = 8;
+      let lastFirestorePct = 5;
 
-      const syncLiveProgressToSender = (pct: number) => {
+      const syncLiveProgressToSender = (overallPct: number) => {
         const now = Date.now();
-        if (pct >= 98 || (pct - lastFirestorePct >= 4 && now - lastFirestoreSyncTime > 300)) {
-          lastFirestorePct = pct;
+        if (
+          overallPct >= 98 ||
+          (overallPct - lastFirestorePct >= 3 && now - lastFirestoreSyncTime > 250)
+        ) {
+          lastFirestorePct = overallPct;
           lastFirestoreSyncTime = now;
-          setDoc(sessionRef, { status: 'transferring', progress: pct }, { merge: true }).catch(
+          setDoc(sessionRef, { status: 'transferring', progress: overallPct }, { merge: true }).catch(
             () => {}
           );
         }
       };
 
-      // Path 1: High-Speed Continuous Batch Phone-to-Phone LAN/Hotspot P2P Stream (Zero Mobile Data!)
-      if (NativeBridgeService.isRunningInKotlinApp()) {
-        for (let lanAttempt = 0; lanAttempt < 3 && !transferredOk; lanAttempt++) {
-          const p2pRes = await NativeBridgeService.receiveDirectTransferFromPeerNative(
-            session.senderIp || '192.168.43.1',
-            session.senderPort || 48821,
-            cleanCode,
-            targetStorageKey,
-            (pct, msg) => {
-              const cleanPct = Math.min(99, Math.max(5, Math.round(pct)));
-              const recvMb = Math.round(((expectedTotalMb * cleanPct) / 100) * 10) / 10;
-              setTransferStatus({
-                active: true,
-                mode: 'receive',
-                progress: cleanPct,
-                message:
-                  msg ||
-                  `Receiving "${session.title}" (${recvMb} MB / ${expectedTotalMb} MB • ${cleanPct}%)`,
-              });
-              syncLiveProgressToSender(cleanPct);
-            }
-          );
-          if (p2pRes && p2pRes.ok) {
-            transferredOk = true;
-            if (p2pRes.totalBytes && p2pRes.totalBytes > 0) {
-              transferredBytes = p2pRes.totalBytes;
-            }
-          } else if (lanAttempt < 2) {
-            await new Promise((r) => setTimeout(r, 450 * (lanAttempt + 1)));
-          }
-        }
-      }
+      let receivedCount = 0;
 
-      // Path 2: Instant Local Vault Verification (ONLY if complete manifest + full file bytes exist in vault)
-      if (!transferredOk) {
-        let hasCompleteNativeVault = false;
-        if (
-          NativeBridgeService.supportsNativeOfflineVault() &&
-          NativeBridgeService.hasOfflineItemNative(targetStorageKey)
-        ) {
-          const cp = NativeBridgeService.getOfflineCheckpointInfoNative(targetStorageKey);
-          const minRequiredBytes = expectedTotalMb * 1024 * 1024 * 0.85;
-          if (cp && cp.exists && cp.totalBytes >= minRequiredBytes) {
-            hasCompleteNativeVault = true;
-            transferredBytes = cp.totalBytes;
-          }
-        }
-        const existingBlob = !hasCompleteNativeVault && !NativeBridgeService.supportsNativeOfflineVault()
-          ? await ClientHlsDownloader.getOfflineBlobUrl(targetStorageKey)
-          : null;
+      for (let itemIdx = 0; itemIdx < totalBatchItems; itemIdx++) {
+        const item = itemsToReceive[itemIdx];
+        const batchPrefix = totalBatchItems > 1 ? `[${itemIdx + 1}/${totalBatchItems}] ` : '';
+        const epSuffix = item.episodeIndex !== undefined ? ` Ep ${item.episodeIndex + 1}` : '';
+        const itemLabel = `${item.title}${epSuffix}`;
 
-        if (hasCompleteNativeVault || existingBlob) {
-          const steps = [24, 52, 78, 96];
-          for (const stepPct of steps) {
-            const recvMb = Math.round(((expectedTotalMb * stepPct) / 100) * 10) / 10;
-            setTransferStatus({
-              active: true,
-              mode: 'receive',
-              progress: stepPct,
-              message: `Receiving "${session.title}" at High Speed (${recvMb} MB / ${expectedTotalMb} MB • ${stepPct}%)`,
-            });
-            syncLiveProgressToSender(stepPct);
-            await new Promise((r) => setTimeout(r, 150));
-          }
-          transferredOk = true;
-        }
-      }
+        const deterministicSuffix = item.contentId
+          ? `${item.contentId}_s${item.seasonIndex ?? 0}_e${item.episodeIndex ?? 0}`
+          : (item.title || `${cleanCode}_${itemIdx}`).toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+        const targetStorageKey = item.storageKey || `dl_recv_${deterministicSuffix}`;
+        const expectedTotalMb = Math.max(1, item.fileSizeMb || 50);
 
-      // Path 3: Fast Direct Stream Relay Fallback (when Sender & Receiver are on different networks or resuming remaining segments)
-      if (!transferredOk) {
-        let candidateUrl = session.videoUrl || '';
-        let secondaryUrl = session.secondaryVideoUrl || '';
+        const toOverallPct = (itemPct: number) => {
+          const base = (itemIdx / totalBatchItems) * 100;
+          const share = (Math.min(100, Math.max(0, itemPct)) / totalBatchItems);
+          return Math.min(99, Math.max(5, Math.round(base + share)));
+        };
 
-        if ((!candidateUrl || !secondaryUrl) && session.contentId) {
-          const catItem = contentList.find((c) => c.id === session.contentId);
-          if (catItem) {
-            if (session.episodeIndex !== undefined && catItem.seasons) {
-              const ep =
-                catItem.seasons[session.seasonIndex || 0]?.episodes?.[session.episodeIndex];
-              if (!candidateUrl) candidateUrl = ep?.videoUrl || '';
-              if (!secondaryUrl) secondaryUrl = (ep as any)?.secondaryVideoUrl || '';
-            } else {
-              if (!candidateUrl) candidateUrl = catItem.videoUrl || '';
-              if (!secondaryUrl) secondaryUrl = (catItem as any).secondaryVideoUrl || '';
-            }
-          }
-        }
+        setTransferStatus({
+          active: true,
+          mode: 'receive',
+          progress: toOverallPct(6),
+          message: `${batchPrefix}Connecting for "${itemLabel}"...`,
+        });
 
-        const relayCandidates = [candidateUrl, secondaryUrl].filter(
-          (u, idx, arr) => Boolean(u && u.trim()) && arr.indexOf(u) === idx
-        );
+        let transferredOk = false;
+        let transferredBytes = expectedTotalMb * 1024 * 1024;
 
-        for (const rawSource of relayCandidates) {
-          if (transferredOk) break;
-          try {
-            setTransferStatus({
-              active: true,
-              mode: 'receive',
-              progress: 14,
-              message: `Receiving "${session.title}" via MaxPlay High-Speed Relay...`,
-            });
-            syncLiveProgressToSender(14);
-
-            let playUrl = rawSource;
-            const refererUrl = SmartStreamService.resolveEmbedReferer(rawSource);
-            if (SmartStreamService.isExtractableSource(rawSource, true)) {
-              const resolved = await SmartStreamService.resolveStream(rawSource);
-              if (resolved && resolved.streamUrl) {
-                playUrl = resolved.streamUrl;
-              }
-            }
-
-            const dlRes = await ClientHlsDownloader.downloadStream(
+        // Path 1: High-Speed Continuous Batch Phone-to-Phone LAN/Hotspot P2P Stream (Zero Mobile Data!)
+        if (NativeBridgeService.isRunningInKotlinApp()) {
+          for (let lanAttempt = 0; lanAttempt < 3 && !transferredOk; lanAttempt++) {
+            const p2pRes = await NativeBridgeService.receiveDirectTransferFromPeerNative(
+              session.senderIp || '192.168.43.1',
+              session.senderPort || 48821,
+              cleanCode,
               targetStorageKey,
-              playUrl,
-              session.quality || '720p',
-              (info) => {
-                const pct = Math.min(
-                  99,
-                  Math.max(
-                    15,
-                    Math.round(
-                      (info.downloadedBytes / Math.max(1, info.totalEstimatedBytes)) * 100
-                    )
-                  )
-                );
-                const mbNow = Math.round((info.downloadedBytes / (1024 * 1024)) * 10) / 10;
-                const mbTotal = Math.max(
-                  expectedTotalMb,
-                  Math.round((info.totalEstimatedBytes / (1024 * 1024)) * 10) / 10
-                );
-                const speedMb = Math.max(
-                  0.5,
-                  Math.round((info.speedBps / (1024 * 1024)) * 10) / 10
-                );
+              (pct, msg) => {
+                const cleanItemPct = Math.min(99, Math.max(5, Math.round(pct)));
+                const overallPct = toOverallPct(cleanItemPct);
+                const recvMb = Math.round(((expectedTotalMb * cleanItemPct) / 100) * 10) / 10;
                 setTransferStatus({
                   active: true,
                   mode: 'receive',
-                  progress: pct,
-                  message: `Receiving "${session.title}" (${mbNow} MB / ${mbTotal} MB • ${speedMb} MB/s • ${pct}%)`,
+                  progress: overallPct,
+                  message: msg
+                    ? `${batchPrefix}${msg}`
+                    : `${batchPrefix}Receiving "${itemLabel}" (${recvMb} MB / ${expectedTotalMb} MB • ${cleanItemPct}%)`,
                 });
-                syncLiveProgressToSender(pct);
-              },
-              session.language || 'Hindi',
-              transferredBytes,
-              refererUrl
+                syncLiveProgressToSender(overallPct);
+              }
             );
-
-            if (dlRes && dlRes.totalBytes > 0) {
+            if (p2pRes && p2pRes.ok) {
               transferredOk = true;
-              transferredBytes = dlRes.totalBytes;
+              if (p2pRes.totalBytes && p2pRes.totalBytes > 0) {
+                transferredBytes = p2pRes.totalBytes;
+              }
+            } else if (lanAttempt < 2) {
+              await new Promise((r) => setTimeout(r, 350 * (lanAttempt + 1)));
             }
-          } catch (relayErr) {
-            console.warn('[DownloadsScreen] Relay candidate fallback:', relayErr);
           }
         }
-      }
 
-      if (!transferredOk) {
-        setTransferStatus(null);
-        triggerToast(
-          'Could not connect to sender phone. Make sure both phones are on the same Wi-Fi/Hotspot.'
+        // Path 2: Instant Local Vault Verification
+        if (!transferredOk) {
+          let hasCompleteNativeVault = false;
+          if (
+            NativeBridgeService.supportsNativeOfflineVault() &&
+            NativeBridgeService.hasOfflineItemNative(targetStorageKey)
+          ) {
+            const cp = NativeBridgeService.getOfflineCheckpointInfoNative(targetStorageKey);
+            const minRequiredBytes = expectedTotalMb * 1024 * 1024 * 0.85;
+            if (cp && cp.exists && cp.totalBytes >= minRequiredBytes) {
+              hasCompleteNativeVault = true;
+              transferredBytes = cp.totalBytes;
+            }
+          }
+          const existingBlob =
+            !hasCompleteNativeVault && !NativeBridgeService.supportsNativeOfflineVault()
+              ? await ClientHlsDownloader.getOfflineBlobUrl(targetStorageKey)
+              : null;
+
+          if (hasCompleteNativeVault || existingBlob) {
+            const steps = [30, 65, 95];
+            for (const stepPct of steps) {
+              const overallPct = toOverallPct(stepPct);
+              const recvMb = Math.round(((expectedTotalMb * stepPct) / 100) * 10) / 10;
+              setTransferStatus({
+                active: true,
+                mode: 'receive',
+                progress: overallPct,
+                message: `${batchPrefix}Receiving "${itemLabel}" at High Speed (${recvMb} MB / ${expectedTotalMb} MB)...`,
+              });
+              syncLiveProgressToSender(overallPct);
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            transferredOk = true;
+          }
+        }
+
+        // Path 3: Fast Direct Stream Relay Fallback
+        if (!transferredOk) {
+          let candidateUrl = item.videoUrl || '';
+          let secondaryUrl = item.secondaryVideoUrl || '';
+
+          if ((!candidateUrl || !secondaryUrl) && item.contentId) {
+            const catItem = contentList.find((c) => c.id === item.contentId);
+            if (catItem) {
+              if (item.episodeIndex !== undefined && catItem.seasons) {
+                const ep =
+                  catItem.seasons[item.seasonIndex || 0]?.episodes?.[item.episodeIndex];
+                if (!candidateUrl) candidateUrl = ep?.videoUrl || '';
+                if (!secondaryUrl) secondaryUrl = (ep as any)?.secondaryVideoUrl || '';
+              } else {
+                if (!candidateUrl) candidateUrl = catItem.videoUrl || '';
+                if (!secondaryUrl) secondaryUrl = (catItem as any).secondaryVideoUrl || '';
+              }
+            }
+          }
+
+          const relayCandidates = [candidateUrl, secondaryUrl].filter(
+            (u, idx, arr) => Boolean(u && u.trim()) && arr.indexOf(u) === idx
+          );
+
+          for (const rawSource of relayCandidates) {
+            if (transferredOk) break;
+            try {
+              const overallStartPct = toOverallPct(14);
+              setTransferStatus({
+                active: true,
+                mode: 'receive',
+                progress: overallStartPct,
+                message: `${batchPrefix}Receiving "${itemLabel}" via MaxPlay High-Speed Relay...`,
+              });
+              syncLiveProgressToSender(overallStartPct);
+
+              let playUrl = rawSource;
+              const refererUrl = SmartStreamService.resolveEmbedReferer(rawSource);
+              if (SmartStreamService.isExtractableSource(rawSource, true)) {
+                const resolved = await SmartStreamService.resolveStream(rawSource);
+                if (resolved && resolved.streamUrl) {
+                  playUrl = resolved.streamUrl;
+                }
+              }
+
+              const dlRes = await ClientHlsDownloader.downloadStream(
+                targetStorageKey,
+                playUrl,
+                item.quality || '720p',
+                (info) => {
+                  const itemPct = Math.min(
+                    99,
+                    Math.max(
+                      15,
+                      Math.round(
+                        (info.downloadedBytes / Math.max(1, info.totalEstimatedBytes)) * 100
+                      )
+                    )
+                  );
+                  const overallPct = toOverallPct(itemPct);
+                  const mbNow = Math.round((info.downloadedBytes / (1024 * 1024)) * 10) / 10;
+                  const mbTotal = Math.max(
+                    expectedTotalMb,
+                    Math.round((info.totalEstimatedBytes / (1024 * 1024)) * 10) / 10
+                  );
+                  const speedMb = Math.max(
+                    0.5,
+                    Math.round((info.speedBps / (1024 * 1024)) * 10) / 10
+                  );
+                  setTransferStatus({
+                    active: true,
+                    mode: 'receive',
+                    progress: overallPct,
+                    message: `${batchPrefix}Receiving "${itemLabel}" (${mbNow} MB / ${mbTotal} MB • ${speedMb} MB/s)`,
+                  });
+                  syncLiveProgressToSender(overallPct);
+                },
+                item.language || 'Hindi',
+                transferredBytes,
+                refererUrl
+              );
+
+              if (dlRes && dlRes.totalBytes > 0) {
+                transferredOk = true;
+                transferredBytes = dlRes.totalBytes;
+              }
+            } catch (relayErr) {
+              console.warn('[DownloadsScreen] Relay candidate fallback:', relayErr);
+            }
+          }
+        }
+
+        if (!transferredOk) {
+          if (receivedCount === 0) {
+            setTransferStatus(null);
+            triggerToast(
+              'Could not connect to sender phone. Make sure both phones are on the same Wi-Fi/Hotspot.'
+            );
+            return;
+          }
+          continue;
+        }
+
+        const finalSizeMb = Math.max(
+          1,
+          Math.round((transferredBytes / (1024 * 1024)) * 10) / 10
         );
-        return;
+
+        downloadManager.addImportedCompletedFile({
+          contentId: item.contentId,
+          episodeId: item.episodeId,
+          seasonIndex: item.seasonIndex,
+          episodeIndex: item.episodeIndex,
+          title: item.title,
+          subtitle: item.subtitle,
+          posterUrl: item.posterUrl,
+          quality: item.quality || '720p',
+          language: item.language || 'Default',
+          fileSizeMb: finalSizeMb,
+          category: 'received',
+          storageKey: targetStorageKey,
+        });
+        receivedCount++;
       }
 
       completedReceiveCodesRef.current.add(cleanCode);
-
-      const finalSizeMb = Math.max(
-        1,
-        Math.round((transferredBytes / (1024 * 1024)) * 10) / 10
-      );
-
-      downloadManager.addImportedCompletedFile({
-        contentId: session.contentId,
-        episodeId: session.episodeId,
-        seasonIndex: session.seasonIndex,
-        episodeIndex: session.episodeIndex,
-        title: session.title,
-        subtitle: session.subtitle,
-        posterUrl: session.posterUrl,
-        quality: session.quality || '720p',
-        language: session.language || 'Default',
-        fileSizeMb: finalSizeMb,
-        category: 'received',
-        storageKey: targetStorageKey,
-      });
-
-      // Remove completed session from nearbySessions UI list immediately so user cannot tap it twice
       setNearbySessions((prev) => prev.filter((s) => s.code !== cleanCode));
 
       setTransferStatus({
         active: true,
         mode: 'receive',
         progress: 100,
-        message: `100% Received! "${session.title}" saved in Received tab.`,
+        message: `100% Received! ${receivedCount > 1 ? `${receivedCount} videos` : `"${session.title}"`} saved in Received tab.`,
       });
 
       try {
@@ -880,7 +991,9 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
       setShowTransferModal(false);
       setReceiveCodeInput('');
       setActiveFilter('received');
-      triggerToast(`100% Received "${session.title}" directly into Received tab!`);
+      triggerToast(
+        `100% Received ${receivedCount > 1 ? `${receivedCount} videos` : `"${session.title}"`} directly into Received tab!`
+      );
     } catch (err) {
       console.error('Direct App-to-App receive failed:', err);
       setTransferStatus(null);
@@ -1584,12 +1697,50 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
                   </div>
                 )}
 
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
                   <span className="text-xs font-extrabold text-white">
-                    Available Downloaded &amp; Received Files (
+                    Select Movies / Episodes to Send (
                     {completedFiles.filter((f) => f.category !== 'local' && !f.hasError).length})
                   </span>
-                  <span className="text-[10px] text-zinc-400">Deleted files are auto-removed</span>
+                  {completedFiles.filter((f) => f.category !== 'local' && !f.hasError).length > 0 && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const allSendableIds = completedFiles
+                            .filter((f) => f.category !== 'local' && !f.hasError)
+                            .map((f) => f.id);
+                          if (selectedSendFileIds.length === allSendableIds.length) {
+                            setSelectedSendFileIds([]);
+                          } else {
+                            setSelectedSendFileIds(allSendableIds);
+                          }
+                        }}
+                        className="text-[10px] font-extrabold text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-lg cursor-pointer"
+                      >
+                        {selectedSendFileIds.length ===
+                        completedFiles.filter((f) => f.category !== 'local' && !f.hasError).length
+                          ? 'Clear Selection'
+                          : 'Select All'}
+                      </button>
+                      {selectedSendFileIds.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const selectedObjs = completedFiles.filter((f) =>
+                              selectedSendFileIds.includes(f.id)
+                            );
+                            if (selectedObjs.length > 0) {
+                              handleStartDirectSendSession(selectedObjs);
+                            }
+                          }}
+                          className="rounded-lg bg-gradient-to-r from-[#10B981] to-[#06B6D4] px-2.5 py-1 text-[10px] font-black text-black shadow-md hover:brightness-110 active:scale-95 cursor-pointer"
+                        >
+                          Send Selected ({selectedSendFileIds.length})
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {completedFiles.filter((f) => f.category !== 'local' && !f.hasError).length > 0 ? (
@@ -1597,18 +1748,21 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
                     {completedFiles
                       .filter((f) => f.category !== 'local' && !f.hasError)
                       .map((file) => {
-                        const isSelected = selectedSendFileId === file.id;
+                        const isChecked = selectedSendFileIds.includes(file.id);
+                        const isSelected = selectedSendFileId === file.id || isChecked;
                         const isCurrentlySending =
                           activeSendSession &&
                           (activeSendSession.storageKey === file.storageKey ||
-                            activeSendSession.title === file.title);
+                            activeSendSession.batchItems?.some(
+                              (b) => b.storageKey === file.storageKey
+                            ));
                         const epLabel =
                           file.episodeIndex !== undefined ? ` • Ep ${file.episodeIndex + 1}` : '';
                         return (
                           <div
                             key={file.id}
-                            onClick={() => setSelectedSendFileId(file.id)}
-                            className={`flex items-center justify-between gap-3 rounded-xl p-2.5 border transition cursor-pointer ${
+                            onClick={() => toggleSelectSendFile(file.id)}
+                            className={`flex items-center justify-between gap-2.5 rounded-xl p-2.5 border transition cursor-pointer ${
                               isCurrentlySending
                                 ? 'bg-emerald-500/20 border-emerald-400'
                                 : isSelected
@@ -1617,6 +1771,15 @@ export const DownloadsScreen: React.FC<DownloadsScreenProps> = ({ onPlayContent 
                             }`}
                           >
                             <div className="flex items-center gap-2.5 min-w-0">
+                              <div
+                                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition ${
+                                  isChecked
+                                    ? 'bg-emerald-500 border-emerald-400 text-black'
+                                    : 'bg-black/40 border-white/25 text-transparent'
+                                }`}
+                              >
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                              </div>
                               <img
                                 src={file.posterUrl || undefined}
                                 alt={file.title}

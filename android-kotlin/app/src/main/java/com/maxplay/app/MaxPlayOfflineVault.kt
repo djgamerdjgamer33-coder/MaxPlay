@@ -36,6 +36,11 @@ object MaxPlayOfflineVault {
 
     private val downloadHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .dispatcher(okhttp3.Dispatcher().apply {
+                maxRequests = 64
+                maxRequestsPerHost = 32
+            })
+            .connectionPool(okhttp3.ConnectionPool(32, 5, TimeUnit.MINUTES))
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(45, TimeUnit.SECONDS)
             .followRedirects(true)
@@ -950,10 +955,14 @@ object MaxPlayOfflineVault {
 
     private val p2pLanHttpClient: okhttp3.OkHttpClient by lazy {
         okhttp3.OkHttpClient.Builder()
+            .dispatcher(okhttp3.Dispatcher().apply {
+                maxRequests = 64
+                maxRequestsPerHost = 32
+            })
             .connectTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
             .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-            .connectionPool(okhttp3.ConnectionPool(48, 5, java.util.concurrent.TimeUnit.MINUTES))
+            .connectionPool(okhttp3.ConnectionPool(64, 5, java.util.concurrent.TimeUnit.MINUTES))
             .retryOnConnectionFailure(true)
             .build()
     }
@@ -1121,7 +1130,7 @@ object MaxPlayOfflineVault {
             try {
                 s.soTimeout = 45000
                 s.tcpNoDelay = true
-                s.sendBufferSize = 2 * 1024 * 1024
+                s.sendBufferSize = 4 * 1024 * 1024
                 val reader = java.io.BufferedReader(java.io.InputStreamReader(s.getInputStream()))
                 val requestLine = reader.readLine() ?: return
                 val parts = requestLine.split(" ")
@@ -1136,7 +1145,7 @@ object MaxPlayOfflineVault {
                     if (hdr.isNullOrEmpty()) break
                 }
 
-                val outStream = java.io.BufferedOutputStream(s.getOutputStream(), 1024 * 1024)
+                val outStream = java.io.BufferedOutputStream(s.getOutputStream(), 2 * 1024 * 1024)
                 val prefix = "/maxplay-p2p/$p2pActiveCode/"
                 if (!reqPath.startsWith(prefix)) {
                     val errBytes = "Not Found".toByteArray()
@@ -1146,8 +1155,52 @@ object MaxPlayOfflineVault {
                     return
                 }
 
-                val safe = sanitizeKey(p2pActiveStorageKey)
+                var queryStorageKey = ""
+                for (pair in queryStr.split("&")) {
+                    val kv = pair.split("=")
+                    if (kv.size == 2 && kv[0] == "key") {
+                        queryStorageKey = try {
+                            java.net.URLDecoder.decode(kv[1], "UTF-8")
+                        } catch (_: Exception) {
+                            kv[1]
+                        }
+                    }
+                }
+
+                val effectiveStorageKey = if (queryStorageKey.isNotBlank()) queryStorageKey else p2pActiveStorageKey
+                val safe = sanitizeKey(effectiveStorageKey)
                 val itemDir = File(getVaultRoot(context), safe)
+                val isCustomKey = effectiveStorageKey != p2pActiveStorageKey
+
+                val activeSegFiles = if (isCustomKey) {
+                    (itemDir.listFiles { _, name ->
+                        name.startsWith("seg_") && name.endsWith(".ts")
+                    } ?: emptyArray()).filter { it.length() > 0L }.sortedBy {
+                        it.name.removePrefix("seg_").removeSuffix(".ts").toIntOrNull() ?: 0
+                    }
+                } else {
+                    segFiles
+                }
+
+                val activeAudFiles = if (isCustomKey) {
+                    (itemDir.listFiles { _, name ->
+                        name.startsWith("aud_") && name.endsWith(".ts")
+                    } ?: emptyArray()).filter { it.length() > 0L }.sortedBy {
+                        it.name.removePrefix("aud_").removeSuffix(".ts").toIntOrNull() ?: 0
+                    }
+                } else {
+                    audFiles
+                }
+
+                val activeTotalBytes = if (isCustomKey) {
+                    var sum = 0L
+                    activeSegFiles.forEach { sum += it.length() }
+                    activeAudFiles.forEach { sum += it.length() }
+                    sum
+                } else {
+                    totalBytes
+                }
+
                 val targetName = reqPath.removePrefix(prefix)
 
                 if (targetName == "manifest.json") {
@@ -1160,19 +1213,19 @@ object MaxPlayOfflineVault {
                     }
                     val realDurationSec = diskManifest?.optDouble("totalDurationSec", 0.0)
                         ?.takeIf { it > 0.0 }
-                        ?: (segFiles.size * 4.0)
-                    val isSingleFile = diskManifest?.optBoolean("isSingleFile", segFiles.size == 1)
-                        ?: (segFiles.size == 1)
+                        ?: (activeSegFiles.size * 4.0)
+                    val isSingleFile = diskManifest?.optBoolean("isSingleFile", activeSegFiles.size == 1)
+                        ?: (activeSegFiles.size == 1)
 
                     val manifestJson = JSONObject().apply {
                         put("ok", true)
                         put("code", p2pActiveCode)
-                        put("storageKey", p2pActiveStorageKey)
-                        put("totalSegments", segFiles.size)
-                        put("totalAudioSegments", audFiles.size)
+                        put("storageKey", effectiveStorageKey)
+                        put("totalSegments", activeSegFiles.size)
+                        put("totalAudioSegments", activeAudFiles.size)
                         put("totalDurationSec", realDurationSec)
                         put("isSingleFile", isSingleFile)
-                        put("totalBytes", totalBytes)
+                        put("totalBytes", activeTotalBytes)
                         put("metadata", metaObj)
                     }.toString().toByteArray(Charsets.UTF_8)
 
@@ -1206,7 +1259,7 @@ object MaxPlayOfflineVault {
                     }
 
                     val isAud = type == "aud"
-                    val fileList = if (isAud) audFiles else segFiles
+                    val fileList = if (isAud) activeAudFiles else activeSegFiles
                     val clampedStart = startIdx.coerceAtLeast(0)
                     val clampedEnd = (if (endIdx >= clampedStart) endIdx else fileList.size - 1)
                         .coerceAtMost(fileList.size - 1)
@@ -1233,7 +1286,7 @@ object MaxPlayOfflineVault {
                     outStream.write(headers.toByteArray(Charsets.UTF_8))
 
                     val dataOut = java.io.DataOutputStream(outStream)
-                    val copyBuf = ByteArray(1024 * 1024)
+                    val copyBuf = ByteArray(2 * 1024 * 1024)
                     for ((idx, exactFile) in resolvedBatchFiles) {
                         val fLen = exactFile.length().toInt()
                         dataOut.writeInt(idx)
@@ -1257,10 +1310,10 @@ object MaxPlayOfflineVault {
 
                 val targetFile = if (targetName.startsWith("seg_") && targetName.endsWith(".ts")) {
                     val idx = targetName.removePrefix("seg_").removeSuffix(".ts").toIntOrNull() ?: -1
-                    File(itemDir, targetName).takeIf { it.exists() } ?: segFiles.getOrNull(idx)
+                    File(itemDir, targetName).takeIf { it.exists() } ?: activeSegFiles.getOrNull(idx)
                 } else if (targetName.startsWith("aud_") && targetName.endsWith(".ts")) {
                     val idx = targetName.removePrefix("aud_").removeSuffix(".ts").toIntOrNull() ?: -1
-                    File(itemDir, targetName).takeIf { it.exists() } ?: audFiles.getOrNull(idx)
+                    File(itemDir, targetName).takeIf { it.exists() } ?: activeAudFiles.getOrNull(idx)
                 } else {
                     null
                 }
@@ -1326,10 +1379,16 @@ object MaxPlayOfflineVault {
             val completedProbes = java.util.concurrent.atomic.AtomicInteger(0)
             val totalProbes = candidateIps.size.coerceAtLeast(1)
 
+            val encodedTargetKey = try {
+                java.net.URLEncoder.encode(targetStorageKey, "UTF-8")
+            } catch (_: Exception) {
+                targetStorageKey
+            }
+
             for (candIp in candidateIps) {
                 InbuiltStreamScraper.backgroundExecutor.execute {
                     try {
-                        val probeUrl = "http://$candIp:$senderPort/maxplay-p2p/$cleanCode/manifest.json"
+                        val probeUrl = "http://$candIp:$senderPort/maxplay-p2p/$cleanCode/manifest.json?key=$encodedTargetKey"
                         val req = Request.Builder().url(probeUrl).build()
                         p2pLanHttpClient.newCall(req).execute().use { resp ->
                             if (resp.isSuccessful) {
@@ -1390,20 +1449,20 @@ object MaxPlayOfflineVault {
                 val doneNow = completedUnits.get()
                 val nowMs = System.currentTimeMillis()
                 val prevEmit = lastEmitTimeMs.get()
-                if (force || doneNow >= totalUnits || (nowMs - prevEmit >= 140L && lastEmitTimeMs.compareAndSet(prevEmit, nowMs))) {
+                if (force || doneNow >= totalUnits || (nowMs - prevEmit >= 120L && lastEmitTimeMs.compareAndSet(prevEmit, nowMs))) {
                     val bytesNow = receivedBytes.get()
                     val pct = (8 + ((doneNow.toDouble() / totalUnits.toDouble()) * 89.0)).toInt().coerceIn(8, 97)
                     val mbNow = String.format(java.util.Locale.US, "%.1f", bytesNow / (1024.0 * 1024.0))
                     val elapsedSec = ((nowMs - startTimeMs) / 1000.0).coerceAtLeast(0.2)
                     val speedMb = String.format(java.util.Locale.US, "%.1f", (bytesNow / (1024.0 * 1024.0)) / elapsedSec)
-                    onProgress(pct, "High-Speed P2P ($mbNow MB • $speedMb MB/s)...")
+                    onProgress(pct, "Turbo P2P ($mbNow MB • $speedMb MB/s)...")
                 }
             }
 
-            // Group segments into contiguous batches of 20 segments for zero-overhead continuous TCP streaming
+            // Group segments into contiguous batches of 40 segments for zero-overhead continuous TCP streaming
             data class P2pBatchJob(val isAudio: Boolean, val startIdx: Int, val endIdx: Int)
             val batchJobs = java.util.concurrent.ConcurrentLinkedQueue<P2pBatchJob>()
-            val batchSize = if (totalSegs == 1) 1 else 20
+            val batchSize = if (totalSegs == 1) 1 else 40
 
             var sIdx = 0
             while (sIdx < totalSegs) {
@@ -1418,12 +1477,12 @@ object MaxPlayOfflineVault {
                 aIdx = eIdx + 1
             }
 
-            val workerCount = minOf(8, batchJobs.size.coerceAtLeast(1))
+            val workerCount = minOf(12, batchJobs.size.coerceAtLeast(1))
             val latch = java.util.concurrent.CountDownLatch(workerCount)
 
             for (w in 0 until workerCount) {
                 InbuiltStreamScraper.backgroundExecutor.execute {
-                    val ioBuf = ByteArray(1024 * 1024)
+                    val ioBuf = ByteArray(2 * 1024 * 1024)
                     try {
                         while (firstError.get() == null) {
                             val batch = batchJobs.poll() ?: break
@@ -1465,13 +1524,13 @@ object MaxPlayOfflineVault {
                                 }
 
                                 try {
-                                    val batchUrl = "$baseUrl/batch?type=$typeParam&start=$curStart&end=${batch.endIdx}"
+                                    val batchUrl = "$baseUrl/batch?key=$encodedTargetKey&type=$typeParam&start=$curStart&end=${batch.endIdx}"
                                     val req = Request.Builder().url(batchUrl).build()
                                     p2pLanHttpClient.newCall(req).execute().use { resp ->
                                         if (!resp.isSuccessful) throw Exception("Batch HTTP ${resp.code}")
                                         val body = resp.body ?: throw Exception("Empty batch stream")
                                         val dataIn = java.io.DataInputStream(
-                                            java.io.BufferedInputStream(body.byteStream(), 1024 * 1024)
+                                            java.io.BufferedInputStream(body.byteStream(), 2 * 1024 * 1024)
                                         )
                                         while (true) {
                                             val segIndex = dataIn.readInt()
