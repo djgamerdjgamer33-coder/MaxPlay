@@ -167,15 +167,39 @@ class InbuiltStreamScraper(
         // Caches resolved Byse playback JSON per video code for 10 minutes (0ms instant reuse)
         private val bysePlaybackCache = ConcurrentHashMap<String, Pair<String, Long>>()
         private val byseEmbedOriginCache = ConcurrentHashMap<String, String>().apply {
-            put("https://byseraguci.com", "https://byseraguci.com")
-            put("https://bysedikamoum.com", "https://byseraguci.com")
-            put("https://f16px.com", "https://f16px.com")
-            put("https://filemoon.sx", "https://byseraguci.com")
-            put("https://filemoon.in", "https://byseraguci.com")
+            put("https://byseraguci.com", "https://filemoon.sx")
+            put("https://bysedikamoum.com", "https://filemoon.sx")
+            put("https://f16px.com", "https://filemoon.sx")
+            put("https://filemoon.sx", "https://filemoon.sx")
+            put("https://filemoon.to", "https://filemoon.to")
+            put("https://filemoon.in", "https://filemoon.sx")
+        }
+
+        @Volatile
+        private var activeVoeOrigin: String = "https://arianathankspecial.com"
+
+        /**
+         * Pre-warms Byse ECDSA P-256 attestation tokens at Android app startup so the very first
+         * Server 2 playback skips the 2 attestation round-trips completely!
+         */
+        fun prewarmByseAttestationAsync(activity: Activity) {
+            backgroundExecutor.execute {
+                try {
+                    val scraper = InbuiltStreamScraper(activity, null)
+                    for (origin in listOf("https://filemoon.sx", "https://filemoon.to")) {
+                        val existing = byseAttestCache[origin]
+                        if (existing == null || existing.second <= System.currentTimeMillis() + 60_000L) {
+                            scraper.performByseAttestation(origin, "$origin/e/x70lrdcyz8h2")
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
         }
 
         private val VOE_DOMAIN_KEYWORDS = listOf(
-            "voe.sx", "voe.", "reputationsickler", "turtledoveconsequent",
+            "voe.sx", "voe.", "arianathankspecial", "susanexpectcare", "shannoncoldalready",
+            "shanelocaldog", "ashleyhardat", "jamespatterncamera", "derricknationtop",
+            "reputationsickler", "turtledoveconsequent",
             "launchreliantcleaverriver", "fraudclatterflyingcar", "321naturelikefur",
             "ralphysuccessfull", "yodelswart", "availedsmallest", "graceaddresscommunity",
             "loriwithinfamily", "nathanfromsubject", "jilliandescribecompany",
@@ -340,56 +364,91 @@ class InbuiltStreamScraper(
     private fun scrapeVoePipeline(sourceUrl: String, customHeaders: Map<String, String>): JSONObject {
         val normalizedUrl = normalizeProviderUrl(sourceUrl, ProviderType.VOE)
         try {
-            var currentUrl = normalizedUrl
-            var refererUrl = extractOriginWithSlash(normalizedUrl)
-            var html = ""
-
-            for (hop in 0 until 5) {
-                val reqBuilder = Request.Builder()
-                    .url(currentUrl)
-                    .header("User-Agent", DEFAULT_USER_AGENT)
-                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                    .header("Accept-Language", "en-US,en;q=0.9")
-                    .header("Referer", refererUrl)
-
-                for ((k, v) in customHeaders) {
-                    reqBuilder.header(k, v)
-                }
-
-                val response = okHttpClient.newCall(reqBuilder.build()).execute()
-                val finalHopUrl = response.request.url.toString()
-                html = response.body?.string() ?: ""
-                if (html.isBlank()) break
-
-                currentUrl = finalHopUrl
-
-                // Extract using Voe-exclusive strategies
-                val extractedNow = extractVoeM3u8FromHtml(html, currentUrl)
-                if (!extractedNow.isNullOrBlank()) {
-                    return buildSuccessResponse(extractedNow, currentUrl, "kotlin_voe_okhttp", ProviderType.VOE)
-                }
-
-                // Follow Voe JS redirect (window.location.href = 'https://...')
-                val jsRedirect = findJsRedirectUrl(html, currentUrl)
-                if (!jsRedirect.isNullOrBlank() && jsRedirect != currentUrl) {
-                    refererUrl = currentUrl
-                    currentUrl = normalizeProviderUrl(jsRedirect, ProviderType.VOE)
-                    continue
-                }
-
-                val nestedIframe = findLegitPlayerIframeUrl(html, currentUrl)
-                if (!nestedIframe.isNullOrBlank() && nestedIframe != currentUrl) {
-                    refererUrl = currentUrl
-                    currentUrl = nestedIframe
-                    continue
-                }
-
-                break
+            val parsedUri = android.net.Uri.parse(normalizedUrl)
+            val origHost = (parsedUri.host ?: "").lowercase()
+            val segs = (parsedUri.path ?: "").split("/").filter { it.isNotBlank() }
+            val voeCode = if (segs.size >= 2 && segs[0].lowercase() in listOf("e", "d", "f", "v")) {
+                segs[1]
+            } else if (segs.size == 1 && segs[0].length >= 6 && !segs[0].contains(".")) {
+                segs[0]
+            } else {
+                ""
             }
 
-            val finalExtracted = extractVoeM3u8FromHtml(html, currentUrl)
-            if (!finalExtracted.isNullOrBlank()) {
-                return buildSuccessResponse(finalExtracted, currentUrl, "kotlin_voe_okhttp", ProviderType.VOE)
+            val isMainVoeSx = origHost == "voe.sx" || origHost.endsWith(".voe.sx")
+            val candidateStarts = buildList {
+                if (!isMainVoeSx) add(normalizedUrl)
+                if (voeCode.isNotEmpty()) {
+                    add("${activeVoeOrigin.trimEnd('/')}/e/$voeCode")
+                    add("https://susanexpectcare.com/e/$voeCode")
+                }
+                add(normalizedUrl)
+            }.distinct()
+
+            for (startUrl in candidateStarts) {
+                var currentUrl = startUrl
+                var refererUrl = "https://voe.sx/"
+                var html = ""
+
+                for (hop in 0 until 6) {
+                    val reqBuilder = Request.Builder()
+                        .url(currentUrl)
+                        .header("User-Agent", DEFAULT_USER_AGENT)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        .header("Accept-Language", "en-US,en;q=0.9")
+                        .header("Referer", refererUrl)
+
+                    for ((k, v) in customHeaders) {
+                        reqBuilder.header(k, v)
+                    }
+
+                    val response = try {
+                        okHttpClient.newCall(reqBuilder.build()).execute()
+                    } catch (_: Exception) {
+                        null
+                    } ?: break
+
+                    val statusCode = response.code
+                    val finalHopUrl = response.request.url.toString()
+                    html = try { response.body?.string() ?: "" } finally { response.close() }
+                    if (html.isBlank()) break
+
+                    if ((statusCode == 403 || statusCode >= 500) && (html.contains("DDoS-Guard") || html.contains("520:"))) {
+                        break
+                    }
+
+                    currentUrl = finalHopUrl
+
+                    // Extract using Voe-exclusive strategies
+                    val extractedNow = extractVoeM3u8FromHtml(html, currentUrl)
+                    if (!extractedNow.isNullOrBlank()) {
+                        try {
+                            val u = android.net.Uri.parse(currentUrl)
+                            val h = u.host ?: ""
+                            if (h.isNotBlank() && !h.contains("voe.sx", ignoreCase = true)) {
+                                activeVoeOrigin = "${u.scheme ?: "https"}://$h"
+                            }
+                        } catch (_: Exception) {}
+                        return buildSuccessResponse(extractedNow, currentUrl, "kotlin_voe_okhttp", ProviderType.VOE)
+                    }
+
+                    // Follow Voe JS redirect (window.location.href = 'https://...')
+                    val jsRedirect = findJsRedirectUrl(html, currentUrl)
+                    if (!jsRedirect.isNullOrBlank() && jsRedirect != currentUrl) {
+                        refererUrl = currentUrl
+                        currentUrl = normalizeProviderUrl(jsRedirect, ProviderType.VOE)
+                        continue
+                    }
+
+                    val nestedIframe = findLegitPlayerIframeUrl(html, currentUrl)
+                    if (!nestedIframe.isNullOrBlank() && nestedIframe != currentUrl) {
+                        refererUrl = currentUrl
+                        currentUrl = nestedIframe
+                        continue
+                    }
+
+                    break
+                }
             }
 
             return JSONObject().apply {
@@ -546,12 +605,7 @@ class InbuiltStreamScraper(
                 }
             }
 
-            val mappedOrigin = byseEmbedOriginCache[origin]
-                ?: if (host.contains("filemoon", ignoreCase = true) || host.contains("bysedikamoum", ignoreCase = true)) {
-                    "https://byseraguci.com"
-                } else {
-                    origin
-                }
+            val mappedOrigin = byseEmbedOriginCache[origin] ?: "https://filemoon.sx"
 
             var discoveredEmbedOrigin = ""
             var videoTitle = ""
@@ -599,138 +653,29 @@ class InbuiltStreamScraper(
                 }
             }
 
-            if (mappedOrigin != "https://byseraguci.com" && mappedOrigin != "https://f16px.com") {
+            if (mappedOrigin != "https://filemoon.sx" && mappedOrigin != "https://filemoon.to") {
                 try {
-                    metaLatch.await(250, TimeUnit.MILLISECONDS)
+                    metaLatch.await(220, TimeUnit.MILLISECONDS)
                 } catch (_: Exception) {}
             }
 
-            val baseCandidates = listOf(mappedOrigin, "https://byseraguci.com", "https://f16px.com", origin, discoveredEmbedOrigin)
+            val baseCandidates = listOf(mappedOrigin, "https://filemoon.sx", "https://filemoon.to", origin, "https://byseraguci.com", discoveredEmbedOrigin)
                 .filter { it.isNotBlank() }
                 .distinct()
 
             val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
             fun performFreshAttestation(candOrigin: String, embedFrameUrl: String): JSONObject? {
-                return try {
-                    val kpg = KeyPairGenerator.getInstance("EC")
-                    kpg.initialize(ECGenParameterSpec("secp256r1"))
-                    val kp = kpg.generateKeyPair()
-                    val ecPub = kp.public as ECPublicKey
-                    val xB64 = b64UrlEncode(bigIntTo32Bytes(ecPub.w.affineX))
-                    val yB64 = b64UrlEncode(bigIntTo32Bytes(ecPub.w.affineY))
-
-                    val publicJwk = JSONObject().apply {
-                        put("kty", "EC")
-                        put("crv", "P-256")
-                        put("x", xB64)
-                        put("y", yB64)
-                    }
-
-                    val chReq = Request.Builder()
-                        .url("$candOrigin/api/videos/access/challenge")
-                        .post("{}".toRequestBody(jsonMediaType))
-                        .header("User-Agent", DEFAULT_USER_AGENT)
-                        .header("Origin", candOrigin)
-                        .header("Referer", embedFrameUrl)
-                        .build()
-
-                    okHttpClient.newCall(chReq).execute().use { chResp ->
-                        if (!chResp.isSuccessful) return null
-                        val chJson = JSONObject(chResp.body?.string() ?: "{}")
-                        val nonceStr = chJson.optString("nonce", "").ifEmpty { chJson.optString("challenge", "") }
-                        val challengeId = chJson.optString("challenge_id", "")
-                        if (nonceStr.isEmpty()) return null
-
-                        val signer = Signature.getInstance("SHA256withECDSA")
-                        signer.initSign(kp.private)
-                        signer.update(nonceStr.toByteArray(Charsets.UTF_8))
-                        val derSig = signer.sign()
-                        val p1363Sig = derToP1363(derSig)
-                        val sigB64Url = b64UrlEncode(p1363Sig)
-
-                        val md = java.security.MessageDigest.getInstance("SHA-256")
-                        fun hashB64(input: String): String =
-                            b64UrlEncode(md.digest(input.toByteArray(Charsets.UTF_8)))
-
-                        val brandVersions = org.json.JSONArray()
-                            .put(JSONObject().put("brand", "Chromium").put("version", "124.0.6367.118"))
-                            .put(JSONObject().put("brand", "Google Chrome").put("version", "124.0.6367.118"))
-                            .put(JSONObject().put("brand", "Not-A.Brand").put("version", "99.0.0.0"))
-
-                        val clientObj = JSONObject().apply {
-                            put("user_agent", DEFAULT_USER_AGENT)
-                            put("architecture", "x86")
-                            put("bitness", "64")
-                            put("platform", "Windows")
-                            put("platform_version", "15.0.0")
-                            put("model", "")
-                            put("ua_full_version", "124.0.6367.118")
-                            put("brand_full_versions", brandVersions)
-                            put("pixel_ratio", 1)
-                            put("screen_width", 1920)
-                            put("screen_height", 1080)
-                            put("color_depth", 24)
-                            put("languages", org.json.JSONArray().put("en-US").put("en"))
-                            put("timezone", "Asia/Kolkata")
-                            put("hardware_concurrency", 8)
-                            put("device_memory", 8)
-                            put("touch_points", 0)
-                            put("webgl_vendor", "Google Inc. (NVIDIA)")
-                            put("webgl_renderer", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)")
-                            put("canvas_hash", hashB64("canvas-byse-access"))
-                            put("audio_hash", hashB64("audio-byse-access"))
-                            put("webgl_params_hash", hashB64("webgl-params"))
-                            put("fonts_hash", hashB64("Arial,Calibri,Consolas,Segoe UI,Tahoma,Times New Roman,Verdana"))
-                            put("codecs_hash", hashB64("codecs-v1"))
-                            put("media_devices", "ai1ao2vi1")
-                            put("pointer_type", "fine,hover")
-                            put("extra", JSONObject().put("vendor", "Google Inc.").put("appVersion", DEFAULT_USER_AGENT.removePrefix("Mozilla/")))
-                        }
-
-                        val attBody = JSONObject().apply {
-                            put("viewer_id", "")
-                            put("device_id", "")
-                            put("challenge_id", challengeId)
-                            put("nonce", nonceStr)
-                            put("signature", sigB64Url)
-                            put("public_key", publicJwk)
-                            put("client", clientObj)
-                            put("storage", JSONObject())
-                            put("attributes", JSONObject().put("entropy", "high"))
-                        }.toString().toRequestBody(jsonMediaType)
-
-                        val attReq = Request.Builder()
-                            .url("$candOrigin/api/videos/access/attest")
-                            .post(attBody)
-                            .header("User-Agent", DEFAULT_USER_AGENT)
-                            .header("Content-Type", "application/json")
-                            .header("Origin", candOrigin)
-                            .header("Referer", embedFrameUrl)
-                            .build()
-
-                        okHttpClient.newCall(attReq).execute().use { attResp ->
-                            if (!attResp.isSuccessful) return null
-                            val attJson = JSONObject(attResp.body?.string() ?: "{}")
-                            val fObj = JSONObject().apply {
-                                put("token", attJson.optString("token", ""))
-                                put("viewer_id", attJson.optString("viewer_id", ""))
-                                put("device_id", attJson.optString("device_id", ""))
-                                put("confidence", attJson.optDouble("confidence", 0.9))
-                            }
-                            byseAttestCache[candOrigin] = Pair(fObj, System.currentTimeMillis() + 9 * 60 * 1000L)
-                            byseEmbedOriginCache[origin] = candOrigin
-                            return fObj
-                        }
-                    }
-                } catch (_: Exception) {
-                    null
+                val res = performByseAttestation(candOrigin, embedFrameUrl)
+                if (res != null) {
+                    byseEmbedOriginCache[origin] = candOrigin
                 }
+                return res
             }
-
             for (candOrigin in baseCandidates) {
                 val embedOrigin = candOrigin
                 val embedFrameUrl = "$candOrigin/e/$code"
+                val candHost = try { android.net.Uri.parse(candOrigin).host ?: host } catch (_: Exception) { host }
 
                 fun buildEmbedReq(url: String, bodyStr: String, captchaToken: String = ""): Request {
                     val b = Request.Builder()
@@ -740,9 +685,9 @@ class InbuiltStreamScraper(
                         .header("Content-Type", "application/json")
                         .header("Origin", embedOrigin)
                         .header("Referer", embedFrameUrl)
-                        .header("X-Embed-Origin", host)
-                        .header("X-Embed-Referer", sourceUrl.trim())
-                        .header("X-Embed-Parent", "$origin/e/$code")
+                        .header("X-Embed-Origin", candHost)
+                        .header("X-Embed-Referer", embedFrameUrl)
+                        .header("X-Embed-Parent", embedFrameUrl)
                     if (captchaToken.isNotEmpty()) {
                         b.header("X-Captcha-Token", captchaToken)
                     }
@@ -906,6 +851,123 @@ class InbuiltStreamScraper(
                 }
             }
             null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    internal fun performByseAttestation(candOrigin: String, embedFrameUrl: String): JSONObject? {
+        return try {
+            val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+            val kpg = KeyPairGenerator.getInstance("EC")
+            kpg.initialize(ECGenParameterSpec("secp256r1"))
+            val kp = kpg.generateKeyPair()
+            val ecPub = kp.public as ECPublicKey
+            val xB64 = b64UrlEncode(bigIntTo32Bytes(ecPub.w.affineX))
+            val yB64 = b64UrlEncode(bigIntTo32Bytes(ecPub.w.affineY))
+
+            val publicJwk = JSONObject().apply {
+                put("kty", "EC")
+                put("crv", "P-256")
+                put("x", xB64)
+                put("y", yB64)
+            }
+
+            val chReq = Request.Builder()
+                .url("$candOrigin/api/videos/access/challenge")
+                .post("{}".toRequestBody(jsonMediaType))
+                .header("User-Agent", DEFAULT_USER_AGENT)
+                .header("Origin", candOrigin)
+                .header("Referer", embedFrameUrl)
+                .build()
+
+            okHttpClient.newCall(chReq).execute().use { chResp ->
+                if (!chResp.isSuccessful) return null
+                val chJson = JSONObject(chResp.body?.string() ?: "{}")
+                val nonceStr = chJson.optString("nonce", "").ifEmpty { chJson.optString("challenge", "") }
+                val challengeId = chJson.optString("challenge_id", "")
+                if (nonceStr.isEmpty()) return null
+
+                val signer = Signature.getInstance("SHA256withECDSA")
+                signer.initSign(kp.private)
+                signer.update(nonceStr.toByteArray(Charsets.UTF_8))
+                val derSig = signer.sign()
+                val p1363Sig = derToP1363(derSig)
+                val sigB64Url = b64UrlEncode(p1363Sig)
+
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                fun hashB64(input: String): String =
+                    b64UrlEncode(md.digest(input.toByteArray(Charsets.UTF_8)))
+
+                val brandVersions = org.json.JSONArray()
+                    .put(JSONObject().put("brand", "Chromium").put("version", "124.0.6367.118"))
+                    .put(JSONObject().put("brand", "Google Chrome").put("version", "124.0.6367.118"))
+                    .put(JSONObject().put("brand", "Not-A.Brand").put("version", "99.0.0.0"))
+
+                val clientObj = JSONObject().apply {
+                    put("user_agent", DEFAULT_USER_AGENT)
+                    put("architecture", "x86")
+                    put("bitness", "64")
+                    put("platform", "Windows")
+                    put("platform_version", "15.0.0")
+                    put("model", "")
+                    put("ua_full_version", "124.0.6367.118")
+                    put("brand_full_versions", brandVersions)
+                    put("pixel_ratio", 1)
+                    put("screen_width", 1920)
+                    put("screen_height", 1080)
+                    put("color_depth", 24)
+                    put("languages", org.json.JSONArray().put("en-US").put("en"))
+                    put("timezone", "Asia/Kolkata")
+                    put("hardware_concurrency", 8)
+                    put("device_memory", 8)
+                    put("touch_points", 0)
+                    put("webgl_vendor", "Google Inc. (NVIDIA)")
+                    put("webgl_renderer", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)")
+                    put("canvas_hash", hashB64("canvas-byse-access"))
+                    put("audio_hash", hashB64("audio-byse-access"))
+                    put("webgl_params_hash", hashB64("webgl-params"))
+                    put("fonts_hash", hashB64("Arial,Calibri,Consolas,Segoe UI,Tahoma,Times New Roman,Verdana"))
+                    put("codecs_hash", hashB64("codecs-v1"))
+                    put("media_devices", "ai1ao2vi1")
+                    put("pointer_type", "fine,hover")
+                    put("extra", JSONObject().put("vendor", "Google Inc.").put("appVersion", DEFAULT_USER_AGENT.removePrefix("Mozilla/")))
+                }
+
+                val attBody = JSONObject().apply {
+                    put("viewer_id", "")
+                    put("device_id", "")
+                    put("challenge_id", challengeId)
+                    put("nonce", nonceStr)
+                    put("signature", sigB64Url)
+                    put("public_key", publicJwk)
+                    put("client", clientObj)
+                    put("storage", JSONObject())
+                    put("attributes", JSONObject().put("entropy", "high"))
+                }.toString().toRequestBody(jsonMediaType)
+
+                val attReq = Request.Builder()
+                    .url("$candOrigin/api/videos/access/attest")
+                    .post(attBody)
+                    .header("User-Agent", DEFAULT_USER_AGENT)
+                    .header("Content-Type", "application/json")
+                    .header("Origin", candOrigin)
+                    .header("Referer", embedFrameUrl)
+                    .build()
+
+                okHttpClient.newCall(attReq).execute().use { attResp ->
+                    if (!attResp.isSuccessful) return null
+                    val attJson = JSONObject(attResp.body?.string() ?: "{}")
+                    val fObj = JSONObject().apply {
+                        put("token", attJson.optString("token", ""))
+                        put("viewer_id", attJson.optString("viewer_id", ""))
+                        put("device_id", attJson.optString("device_id", ""))
+                        put("confidence", attJson.optDouble("confidence", 0.9))
+                    }
+                    byseAttestCache[candOrigin] = Pair(fObj, System.currentTimeMillis() + 9 * 60 * 1000L)
+                    return fObj
+                }
+            }
         } catch (_: Exception) {
             null
         }

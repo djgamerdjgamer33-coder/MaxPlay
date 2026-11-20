@@ -155,28 +155,78 @@ class StreamtapeExtractor(
             val tail = cur.toString().trim()
             if (tail.isNotEmpty()) parts.add(tail)
 
-            val litPattern = Pattern.compile("^[(]*\\s*(['\"])([\\s\\S]*?)\\1\\s*[)]*(.*)$")
-            val subPattern = Pattern.compile("\\.(?:substring|slice)\\s*\\(\\s*(\\d+)\\s*(?:,\\s*(\\d+)\\s*)?\\)")
+            fun hasMatchingOuterParens(s: String): Boolean {
+                if (!s.startsWith("(") || !s.endsWith(")")) return false
+                var depth = 0
+                var q: Char? = null
+                var esc = false
+                for (idx in s.indices) {
+                    val ch = s[idx]
+                    if (esc) { esc = false; continue }
+                    if (q != null) {
+                        if (ch == '\\') esc = true else if (ch == q) q = null
+                        continue
+                    }
+                    when (ch) {
+                        '\'', '"' -> q = ch
+                        '(' -> depth++
+                        ')' -> {
+                            depth--
+                            if (depth == 0 && idx < s.length - 1) return false
+                        }
+                    }
+                }
+                return depth == 0
+            }
+
+            val suffixPattern = Pattern.compile("^(.*)\\.(substring|substr|slice)\\s*\\(\\s*(\\d+)\\s*(?:,\\s*(\\d+)\\s*)?\\)\\s*$", Pattern.DOTALL)
+
+            fun evalTerm(rawTerm: String, depth: Int = 0): String {
+                if (depth > 16) return ""
+                var s = rawTerm.trim()
+                if (s.isEmpty()) return ""
+
+                val ops = mutableListOf<Triple<String, Int, Int?>>()
+                while (true) {
+                    val m = suffixPattern.matcher(s)
+                    if (!m.matches()) break
+                    s = (m.group(1) ?: "").trim()
+                    ops.add(0, Triple(m.group(2) ?: "substring", m.group(3)?.toIntOrNull() ?: 0, m.group(4)?.toIntOrNull()))
+                }
+
+                var value = when {
+                    hasMatchingOuterParens(s) -> evaluateStreamtapeJsExpr(s.substring(1, s.length - 1))
+                    (s.startsWith("'") && s.endsWith("'")) || (s.startsWith("\"") && s.endsWith("\"")) ->
+                        s.substring(1, s.length - 1)
+                            .replace("\\/", "/")
+                            .replace("\\'", "'")
+                            .replace("\\\"", "\"")
+                    else -> ""
+                }
+
+                for ((opName, startIdx, endIdx) in ops) {
+                    val safeStart = startIdx.coerceIn(0, value.length)
+                    value = when (opName) {
+                        "substr" -> {
+                            if (endIdx != null) {
+                                val safeEnd = (safeStart + endIdx).coerceIn(safeStart, value.length)
+                                value.substring(safeStart, safeEnd)
+                            } else value.substring(safeStart)
+                        }
+                        else -> {
+                            if (endIdx != null) {
+                                val safeEnd = endIdx.coerceIn(safeStart, value.length)
+                                value.substring(safeStart, safeEnd)
+                            } else value.substring(safeStart)
+                        }
+                    }
+                }
+                return value
+            }
 
             val out = StringBuilder()
             for (part in parts) {
-                val lm = litPattern.matcher(part)
-                if (!lm.find()) continue
-                var value = lm.group(2) ?: ""
-                val chain = lm.group(3) ?: ""
-                val sm = subPattern.matcher(chain)
-                while (sm.find()) {
-                    val startIdx = sm.group(1)?.toIntOrNull() ?: 0
-                    val endIdx = sm.group(2)?.toIntOrNull()
-                    val safeStart = startIdx.coerceIn(0, value.length)
-                    value = if (endIdx != null) {
-                        val safeEnd = endIdx.coerceIn(safeStart, value.length)
-                        value.substring(safeStart, safeEnd)
-                    } else {
-                        value.substring(safeStart)
-                    }
-                }
-                out.append(value)
+                out.append(evalTerm(part, 1))
             }
             return out.toString().trim()
         }
@@ -303,61 +353,36 @@ class StreamtapeExtractor(
         var sizeBytes = 0L
         var mimeType = "video/mp4"
 
-        // 1. Check 302 redirect location + Content-Length via HEAD
+        // Single Range: bytes=0-0 GET resolves 302 redirect + exact total file size + MIME in 1 round-trip!
         try {
-            val headReq = Request.Builder()
+            val rangeReq = Request.Builder()
                 .url(directUrl)
-                .head()
                 .header("User-Agent", userAgent)
                 .header("Referer", referer)
                 .header("Origin", "https://streamtape.com")
                 .header("Accept", "*/*")
+                .header("Range", "bytes=0-0")
                 .build()
 
-            InbuiltStreamScraper.okHttpClient.newCall(headReq).execute().use { resp ->
+            InbuiltStreamScraper.okHttpClient.newCall(rangeReq).execute().use { resp ->
                 val finalUrl = resp.request.url.toString()
                 if (finalUrl.startsWith("http")) {
                     resolvedCdnUrl = finalUrl
                 }
-                val cl = resp.header("Content-Length")?.toLongOrNull() ?: 0L
-                if (cl > 100_000L) sizeBytes = cl
+                val cr = resp.header("Content-Range") ?: ""
+                val slashIdx = cr.lastIndexOf('/')
+                if (slashIdx != -1) {
+                    val total = cr.substring(slashIdx + 1).trim().toLongOrNull() ?: 0L
+                    if (total > 100_000L) sizeBytes = total
+                }
+                if (sizeBytes <= 0L) {
+                    val cl = resp.header("Content-Length")?.toLongOrNull() ?: 0L
+                    if (cl > 100_000L) sizeBytes = cl
+                }
                 val ct = (resp.header("Content-Type") ?: "").substringBefore(";").trim().lowercase()
                 if (ct.startsWith("video/")) mimeType = ct
             }
         } catch (_: Exception) {}
-
-        // 2. Fallback: Range: bytes=0-0 GET request (works even when CDN rejects HEAD)
-        if (sizeBytes <= 0L) {
-            try {
-                val rangeReq = Request.Builder()
-                    .url(resolvedCdnUrl)
-                    .header("User-Agent", userAgent)
-                    .header("Referer", referer)
-                    .header("Origin", "https://streamtape.com")
-                    .header("Accept", "*/*")
-                    .header("Range", "bytes=0-0")
-                    .build()
-
-                InbuiltStreamScraper.okHttpClient.newCall(rangeReq).execute().use { resp ->
-                    val finalUrl = resp.request.url.toString()
-                    if (finalUrl.startsWith("http")) {
-                        resolvedCdnUrl = finalUrl
-                    }
-                    val cr = resp.header("Content-Range") ?: ""
-                    val slashIdx = cr.lastIndexOf('/')
-                    if (slashIdx != -1) {
-                        val total = cr.substring(slashIdx + 1).trim().toLongOrNull() ?: 0L
-                        if (total > 100_000L) sizeBytes = total
-                    }
-                    if (sizeBytes <= 0L) {
-                        val cl = resp.header("Content-Length")?.toLongOrNull() ?: 0L
-                        if (cl > 100_000L) sizeBytes = cl
-                    }
-                    val ct = (resp.header("Content-Type") ?: "").substringBefore(";").trim().lowercase()
-                    if (ct.startsWith("video/")) mimeType = ct
-                }
-            } catch (_: Exception) {}
-        }
 
         return Triple(resolvedCdnUrl, sizeBytes, mimeType)
     }

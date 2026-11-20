@@ -7,6 +7,7 @@
  */
 
 import { NativeBridgeService } from "./nativeBridgeService";
+import { buildByseCandidateOrigins, buildVoeCandidateUrls } from "../utils/streamExtractorUtils";
 
 export interface CachedStreamMetadata {
   qualities?: string[];
@@ -797,10 +798,8 @@ export class SmartStreamService {
         return "0";
       };
 
-      const preferByseOrigin =
-        lower.includes("filemoon") || lower.includes("bysedikamoum")
-          ? "https://byseraguci.com"
-          : origin;
+      const candidateOrigins = buildByseCandidateOrigins(origin);
+      const preferByseOrigin = candidateOrigins[0] || "https://filemoon.sx";
 
       let videoTitle = "";
       let defaultLangCode = "";
@@ -822,9 +821,6 @@ export class SmartStreamService {
         } catch {}
       })();
 
-      const candidateOrigins = Array.from(
-        new Set([preferByseOrigin, "https://byseraguci.com", "https://f16px.com", origin])
-      );
       for (const apiOrigin of candidateOrigins) {
         try {
           let fingerprint = this.byseClientAttestCache.get(apiOrigin)?.fingerprint;
@@ -1344,33 +1340,49 @@ export class SmartStreamService {
       lowerUrl.includes("shavetape.") ||
       lowerUrl.includes("streamta.pe");
 
-    // 1.1 Priority Tier (Android APK): Only run Native Kotlin Scraper on non-Streamtape & non-Byse links
-    // (with a strict 3.5s cap so dead VOE Server 1 links fail over to Server 2 in < 3.5s, and Streamtape/Byse never block on the 16.5s WebView sniffer!)
-    if (isKotlinApp && !isStreamtape && !isByseOrFilemoon) {
+    // 1.1 Priority Tier (Android APK): Run Native Kotlin Scraper for ALL 3 providers (VOE, Byse/Filemoon, AND Streamtape)
+    // On-device OkHttp + 4-thread Kotlin PoW + IP-matched Streamtape scraping bypasses CORS completely!
+    if (isKotlinApp) {
       try {
+        const nativeCapMs = isByseOrFilemoon || isStreamtape ? 11500 : 6500;
         const nativeRes = await Promise.race([
           NativeBridgeService.extractStreamNative(trimmed),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500)),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), nativeCapMs)),
         ]);
         if (nativeRes && nativeRes.ok && nativeRes.m3u8Url) {
-          const ttlMs = 170 * 60 * 1000;
+          const ttlMs = isStreamtape ? 25 * 60 * 1000 : 170 * 60 * 1000;
           const expiresAt = Date.now() + ttlMs;
-          const refHeader = nativeRes.headers?.Referer || nativeRes.headers?.referer || this.resolveEmbedReferer(trimmed);
+          const refHeader =
+            nativeRes.headers?.Referer ||
+            nativeRes.headers?.referer ||
+            (isStreamtape ? "https://streamtape.com/" : this.resolveEmbedReferer(trimmed));
+
+          const isNativeDirectVideo = Boolean(
+            isStreamtape ||
+            nativeRes.m3u8Url.toLowerCase().includes("/get_video") ||
+            nativeRes.m3u8Url.toLowerCase().includes("tapecontent.net")
+          );
+          const finalNativeStreamUrl =
+            isNativeDirectVideo && !nativeRes.m3u8Url.includes("/api/stream-proxy")
+              ? `/api/stream-proxy?url=${encodeURIComponent(nativeRes.m3u8Url)}&referer=${encodeURIComponent(refHeader)}`
+              : nativeRes.m3u8Url;
+
           this.registerStreamHostReferer(nativeRes.m3u8Url, refHeader);
           const metaPayload: CachedStreamMetadata = {
             qualities: nativeRes.qualities,
             qualityLinks: nativeRes.qualityLinks,
             rawM3u8Url: nativeRes.m3u8Url,
+            proxiedM3u8Url: finalNativeStreamUrl,
             downloadQualities: nativeRes.downloadQualities,
             audioTracks: nativeRes.audioTracks,
             duration: nativeRes.duration,
             headers: nativeRes.headers,
             referer: refHeader,
           };
-          this.setClientCache(trimmed, nativeRes.m3u8Url, expiresAt, metaPayload);
-          this.setClientCache(nativeRes.m3u8Url, nativeRes.m3u8Url, expiresAt, metaPayload);
+          this.setClientCache(trimmed, finalNativeStreamUrl, expiresAt, metaPayload);
+          this.setClientCache(finalNativeStreamUrl, finalNativeStreamUrl, expiresAt, metaPayload);
           return {
-            streamUrl: nativeRes.m3u8Url,
+            streamUrl: finalNativeStreamUrl,
             isExtracted: true,
             cached: false,
             isEmbed: false,
@@ -1632,7 +1644,8 @@ export class SmartStreamService {
     meta?: CachedStreamMetadata;
   }> {
     try {
-      let currentUrl = SmartStreamService.getEmbedUrl(sourceUrl) || sourceUrl.trim();
+      const voeCandidates = buildVoeCandidateUrls(sourceUrl);
+      let currentUrl = voeCandidates[0] || SmartStreamService.getEmbedUrl(sourceUrl) || sourceUrl.trim();
       let refererUrl = "https://voe.sx/";
       try {
         refererUrl = `${new URL(currentUrl).origin}/`;

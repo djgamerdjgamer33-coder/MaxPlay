@@ -92,6 +92,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(rootContainer)
 
         configureCorsFreeWebView()
+        InbuiltStreamScraper.prewarmByseAttestationAsync(this)
 
         val isAdminApp = packageName.endsWith(".admin", ignoreCase = true)
 

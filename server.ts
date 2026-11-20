@@ -1,6 +1,7 @@
 import express from "express";
 import https from "https";
 import dns from "dns";
+import { Worker } from "worker_threads";
 import { exec, spawn, execSync } from "child_process";
 import path from "path";
 import fs from "fs";
@@ -9,6 +10,11 @@ import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Modality } from "@google/genai";
 import dotenv from "dotenv";
+import {
+  buildByseCandidateOrigins,
+  buildVoeCandidateUrls,
+  extractVoeVideoCode
+} from "./src/utils/streamExtractorUtils";
 
 dotenv.config();
 
@@ -610,7 +616,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     if (cached) {
       candidateIps.push(cached);
     }
-    const resolved = await dns.promises.resolve4(parsed.hostname).catch(() => []);
+    const resolved = await resolveSprintIpv4Cached(parsed.hostname);
     for (const ip of resolved) {
       if (!candidateIps.includes(ip)) candidateIps.push(ip);
     }
@@ -635,6 +641,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       }>((resolve, reject) => {
         let settled = false;
         const req = https.request({
+          agent: sprintKeepAliveAgent,
           host: ip,
           port: 443,
           servername: parsed.hostname,
@@ -642,6 +649,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           method: options.method || "GET",
           headers: {
             "Host": parsed.hostname,
+            "Connection": "keep-alive",
             ...(options.headers || {})
           }
         }, (resp) => {
@@ -765,7 +773,29 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     }
   }
 
-  // Zero-buffer streaming SprintCDN proxy: races IPv4s ONLY for connection/headers, then pipes bytes directly
+  // Persistent Keep-Alive HTTPS agent & 5-minute DNS cache for SprintCDN / HLS proxy
+  const sprintKeepAliveAgent = new https.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 30000,
+    maxSockets: 96,
+    maxFreeSockets: 24
+  });
+  const sprintDnsCache = new Map<string, { ips: string[]; expiresAt: number }>();
+
+  async function resolveSprintIpv4Cached(hostname: string): Promise<string[]> {
+    const now = Date.now();
+    const cached = sprintDnsCache.get(hostname);
+    if (cached && cached.expiresAt > now && cached.ips.length > 0) {
+      return cached.ips;
+    }
+    const resolved = await dns.promises.resolve4(hostname).catch(() => []);
+    if (resolved.length > 0) {
+      sprintDnsCache.set(hostname, { ips: resolved, expiresAt: now + 5 * 60 * 1000 });
+    }
+    return resolved;
+  }
+
+  // Zero-buffer streaming SprintCDN proxy: races IPv4s ONLY on cold cache, reuses warm keep-alive TLS sockets!
   async function streamSprintCdnToResponse(
     targetUrl: string,
     headers: Record<string, string>,
@@ -783,14 +813,17 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     const candidateIps: string[] = [];
     const cachedIp = sprintCdnWorkingIpCache.get(parsed.hostname);
     if (cachedIp) candidateIps.push(cachedIp);
-    const resolved = await dns.promises.resolve4(parsed.hostname).catch(() => []);
+    const resolved = await resolveSprintIpv4Cached(parsed.hostname);
     for (const ip of resolved) {
       if (!candidateIps.includes(ip)) candidateIps.push(ip);
     }
     if (candidateIps.length === 0) return false;
 
-    const openViaIp = (ip: string, headerTimeoutMs: number = 3000) =>
-      new Promise<{
+    const openViaIp = (ip: string, headerTimeoutMs: number = 2800) => {
+      let activeReq: import("http").ClientRequest | null = null;
+      let activeIncoming: import("http").IncomingMessage | null = null;
+      let aborted = false;
+      const promise = new Promise<{
         ip: string;
         status: number;
         respHeaders: Record<string, string | string[] | undefined>;
@@ -800,6 +833,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
         let settled = false;
         const upstreamReq = https.request(
           {
+            agent: sprintKeepAliveAgent,
             host: ip,
             port: 443,
             servername: parsed.hostname,
@@ -807,11 +841,17 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
             method: req?.method === "HEAD" ? "HEAD" : "GET",
             headers: {
               "Host": parsed.hostname,
+              "Connection": "keep-alive",
               ...headers
             }
           },
           (incoming) => {
             clearTimeout(headerTimer);
+            activeIncoming = incoming;
+            if (aborted) {
+              try { incoming.destroy(); } catch {}
+              return;
+            }
             const status = incoming.statusCode || 200;
             if (status >= 500) {
               incoming.destroy();
@@ -835,6 +875,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
             }
           }
         );
+        activeReq = upstreamReq;
 
         const headerTimer = setTimeout(() => {
           upstreamReq.destroy();
@@ -853,6 +894,22 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
         });
         upstreamReq.end();
       });
+      const cancel = () => {
+        aborted = true;
+        try { activeIncoming?.destroy(); } catch {}
+        try { activeReq?.destroy(); } catch {}
+      };
+      return { ip, promise, cancel };
+    };
+
+    const raceIps = async (ips: string[], timeoutMs: number) => {
+      const racers = ips.map((ip) => openViaIp(ip, timeoutMs));
+      const win = await Promise.any(racers.map((r) => r.promise));
+      for (const r of racers) {
+        if (r.ip !== win.ip) r.cancel();
+      }
+      return win;
+    };
 
     let winner: {
       ip: string;
@@ -865,16 +922,14 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     try {
       if (cachedIp) {
         try {
-          winner = await openViaIp(cachedIp, 2600);
+          winner = await openViaIp(cachedIp, 2400).promise;
         } catch {
           sprintCdnWorkingIpCache.delete(parsed.hostname);
           const fallbackIps = candidateIps.filter((ip) => ip !== cachedIp);
-          winner = await Promise.any(
-            (fallbackIps.length > 0 ? fallbackIps : candidateIps).map((ip) => openViaIp(ip, 3000))
-          );
+          winner = await raceIps(fallbackIps.length > 0 ? fallbackIps : candidateIps, 2800);
         }
       } else {
-        winner = await Promise.any(candidateIps.map((ip) => openViaIp(ip, 3000)));
+        winner = await raceIps(candidateIps, 2800);
       }
     } catch {
       return false;
@@ -909,8 +964,10 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       try { if (!res.writableEnded) res.end(); } catch {}
     });
     req.on("close", () => {
-      try { winner.incoming.destroy(); } catch {}
-      try { winner.upstreamReq.destroy(); } catch {}
+      if (!res.writableEnded) {
+        try { winner.incoming.destroy(); } catch {}
+        try { winner.upstreamReq.destroy(); } catch {}
+      }
     });
     winner.incoming.pipe(res);
     return true;
@@ -1301,6 +1358,181 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     return "0";
   }
 
+  // Persistent 4-thread Worker Pool for Byse PoW (4x faster + ZERO Express event-loop blocking!)
+  const BYSE_POW_WORKER_CODE = `
+    const { parentPort } = require('worker_threads');
+    const r = new Uint32Array(512);
+    const digits = new Uint8Array(12);
+    parentPort.on('message', (msg) => {
+      const { jobId, nonce, difficulty, start, step, stopFlag } = msg;
+      const stopArr = new Int32Array(stopFlag);
+      const prefix = nonce + ':';
+      let p0 = 1779033703, p1 = 3144134277, p2 = 1013904242, p3 = 2773480762;
+      for (let i = 0; i < prefix.length; i++) {
+        p0 = (p0 + (prefix.charCodeAt(i) & 255)) >>> 0;
+        p0 = ((p0 << 7) | (p0 >>> 25)) >>> 0;
+        p0 = (p0 + p1) >>> 0; p3 = (((p3 ^ p0) << 16) | ((p3 ^ p0) >>> 16)) >>> 0;
+        p2 = (p2 + p3) >>> 0; p1 = (((p1 ^ p2) << 12) | ((p1 ^ p2) >>> 20)) >>> 0;
+        p0 = (p0 + p1) >>> 0; p3 = (((p3 ^ p0) << 8) | ((p3 ^ p0) >>> 24)) >>> 0;
+        p2 = (p2 + p3) >>> 0; p1 = (((p1 ^ p2) << 7) | ((p1 ^ p2) >>> 25)) >>> 0;
+      }
+      let checks = 0;
+      for (let s = start; s < 5000000; s += step) {
+        if ((checks++ & 63) === 0 && Atomics.load(stopArr, 0) !== 0) {
+          parentPort.postMessage({ jobId, solution: null });
+          return;
+        }
+        let e0 = p0, e1 = p1, e2 = p2, e3 = p3;
+        let temp = s, len = 0;
+        if (temp === 0) { digits[0] = 48; len = 1; }
+        else { while (temp > 0) { digits[len++] = 48 + (temp % 10); temp = (temp / 10) | 0; } }
+        for (let i = len - 1; i >= 0; i--) {
+          e0 = (e0 + digits[i]) >>> 0; e0 = ((e0 << 7) | (e0 >>> 25)) >>> 0;
+          e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+          e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+          e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+          e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
+        }
+        for (let i = 0; i < 8; i++) {
+          e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+          e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+          e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+          e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
+        }
+        for (let i = 0; i < 512; i++) {
+          e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+          e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+          e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+          e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
+          r[i] = (e0 ^ e2) >>> 0;
+        }
+        for (let i = 0; i < 2; i++) {
+          for (let k = 0; k < 512; k++) {
+            const a = r[k] & 511;
+            let c = (r[k] + r[a]) >>> 0;
+            c = ((c << 13) | (c >>> 19)) >>> 0;
+            c = (c ^ (Math.imul(r[(k + 1) & 511], 2654435761) >>> 0)) >>> 0;
+            r[k] = c;
+            e0 = (e0 ^ c) >>> 0;
+            e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+            e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+            e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+            e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
+          }
+        }
+        e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 16) | ((e3 ^ e0) >>> 16)) >>> 0;
+        e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 12) | ((e1 ^ e2) >>> 20)) >>> 0;
+        e0 = (e0 + e1) >>> 0; e3 = (((e3 ^ e0) << 8) | ((e3 ^ e0) >>> 24)) >>> 0;
+        e2 = (e2 + e3) >>> 0; e1 = (((e1 ^ e2) << 7) | ((e1 ^ e2) >>> 25)) >>> 0;
+        let sWord = e0;
+        for (let c = 0; c < 64; c++) {
+          const d = r[c];
+          sWord = (sWord + d) >>> 0;
+          sWord = ((sWord << 5) | (sWord >>> 27)) >>> 0;
+          sWord = (sWord ^ (Math.imul(d, 2246822519) >>> 0)) >>> 0;
+        }
+        if (Math.clz32((sWord ^ e2) >>> 0) >= difficulty) {
+          Atomics.store(stopArr, 0, 1);
+          parentPort.postMessage({ jobId, solution: String(s) });
+          return;
+        }
+      }
+      parentPort.postMessage({ jobId, solution: null });
+    });
+  `;
+
+  const POW_POOL_SIZE = 4;
+  let powWorkers: Worker[] = [];
+  let powJobSeq = 0;
+  let powQueuePromise: Promise<void> = Promise.resolve();
+
+  function getPowWorkers(): Worker[] {
+    if (powWorkers.length === POW_POOL_SIZE) return powWorkers;
+    try {
+      while (powWorkers.length < POW_POOL_SIZE) {
+        const w = new Worker(BYSE_POW_WORKER_CODE, { eval: true });
+        w.unref();
+        powWorkers.push(w);
+      }
+    } catch {
+      return [];
+    }
+    return powWorkers;
+  }
+
+  // Pre-spawn worker threads shortly after server boot so first Byse PoW has 0ms spawn overhead
+  setTimeout(() => { getPowWorkers(); }, 300);
+
+  async function solveBysePowParallel(nonce: string, difficulty: number): Promise<string> {
+    if (!difficulty || difficulty <= 0) return "0";
+    const workers = getPowWorkers();
+    if (workers.length === 0 || typeof SharedArrayBuffer === "undefined") {
+      return solveBysePow(nonce, difficulty);
+    }
+
+    // Serialize PoW bursts through the 4-worker pool so each job gets 100% of all 4 threads
+    let releaseQueue!: () => void;
+    const prev = powQueuePromise;
+    powQueuePromise = new Promise<void>((r) => { releaseQueue = r; });
+    await prev;
+
+    try {
+      const jobId = ++powJobSeq;
+      const stopFlag = new SharedArrayBuffer(4);
+      const stopArr = new Int32Array(stopFlag);
+      return await new Promise<string>((resolve) => {
+        let finished = 0;
+        let settled = false;
+        const cleanup = () => {
+          for (const w of workers) {
+            w.off("message", onMsg);
+          }
+        };
+        const timer = setTimeout(() => {
+          Atomics.store(stopArr, 0, 1);
+          if (!settled) {
+            settled = true;
+            cleanup();
+            resolve("0");
+          }
+        }, 8000);
+
+        const onMsg = (msg: { jobId: number; solution: string | null }) => {
+          if (!msg || msg.jobId !== jobId) return;
+          if (msg.solution !== null && !settled) {
+            settled = true;
+            clearTimeout(timer);
+            Atomics.store(stopArr, 0, 1);
+            cleanup();
+            resolve(msg.solution);
+            return;
+          }
+          finished++;
+          if (finished >= workers.length && !settled) {
+            settled = true;
+            clearTimeout(timer);
+            cleanup();
+            resolve("0");
+          }
+        };
+
+        for (let i = 0; i < workers.length; i++) {
+          workers[i].on("message", onMsg);
+          workers[i].postMessage({
+            jobId,
+            nonce,
+            difficulty,
+            start: i,
+            step: workers.length,
+            stopFlag
+          });
+        }
+      });
+    } finally {
+      releaseQueue();
+    }
+  }
+
   function unpackDeanEdwardsPacker(packedBlock: string): string {
     try {
       const idx = packedBlock.indexOf("}(");
@@ -1351,21 +1583,28 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
 
   // Cache Byse fingerprint attestation tokens for 9 minutes per embedOrigin (JWT valid for 10m)
   const byseAttestCache = new Map<string, { fingerprint: any; expiresAt: number }>();
+  const byseAttestInFlight = new Map<string, Promise<any | null>>();
   const byseEmbedOriginCache = new Map<string, string>([
-    ["https://byseraguci.com", "https://byseraguci.com"],
-    ["https://bysedikamoum.com", "https://byseraguci.com"],
-    ["https://f16px.com", "https://f16px.com"],
-    ["https://filemoon.sx", "https://byseraguci.com"],
-    ["https://filemoon.in", "https://byseraguci.com"]
+    ["https://byseraguci.com", "https://filemoon.sx"],
+    ["https://bysedikamoum.com", "https://filemoon.sx"],
+    ["https://f16px.com", "https://filemoon.sx"],
+    ["https://filemoon.sx", "https://filemoon.sx"],
+    ["https://filemoon.to", "https://filemoon.to"],
+    ["https://filemoon.in", "https://filemoon.sx"]
   ]);
 
-  async function getOrAttestByseFingerprint(embedOrigin: string, embedFrameUrl: string, ua: string): Promise<any | null> {
+  async function getOrAttestByseFingerprint(embedOrigin: string, embedFrameUrl: string, ua: string, forceFresh: boolean = false): Promise<any | null> {
     const now = Date.now();
-    const cachedAttest = byseAttestCache.get(embedOrigin);
-    if (cachedAttest && cachedAttest.expiresAt > now) {
-      return cachedAttest.fingerprint;
+    if (!forceFresh) {
+      const cachedAttest = byseAttestCache.get(embedOrigin);
+      if (cachedAttest && cachedAttest.expiresAt > now) {
+        return cachedAttest.fingerprint;
+      }
+      const inFlight = byseAttestInFlight.get(embedOrigin);
+      if (inFlight) return inFlight;
     }
 
+    const attestTask = (async (): Promise<any | null> => {
     try {
       const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
       const jwk = publicKey.export({ format: "jwk" });
@@ -1463,21 +1702,30 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     } catch {
       return null;
     }
+    })();
+
+    byseAttestInFlight.set(embedOrigin, attestTask);
+    try {
+      return await attestTask;
+    } finally {
+      byseAttestInFlight.delete(embedOrigin);
+    }
   }
 
-  // Background pre-warmer so Byse attestation fingerprint is always hot (0ms on user request)
+  // Background pre-warmer so Byse attestation fingerprints are ALWAYS hot (0ms on user request)
   const defaultByseUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-  setTimeout(() => {
-    getOrAttestByseFingerprint("https://byseraguci.com", "https://byseraguci.com/e/wm894ng2635g", defaultByseUa).catch(() => {});
-  }, 500);
-  setInterval(() => {
-    getOrAttestByseFingerprint("https://byseraguci.com", "https://byseraguci.com/e/wm894ng2635g", defaultByseUa).catch(() => {});
-  }, 8 * 60 * 1000);
+  const prewarmByseOrigins = () => {
+    for (const orig of ["https://filemoon.sx", "https://filemoon.to", "https://byseraguci.com"]) {
+      getOrAttestByseFingerprint(orig, `${orig}/e/x70lrdcyz8h2`, defaultByseUa).catch(() => {});
+    }
+  };
+  setTimeout(prewarmByseOrigins, 400);
+  setInterval(prewarmByseOrigins, 8 * 60 * 1000);
 
   const bysePlaybackCache = new Map<string, { result: any; expiresAt: number }>();
   const bysePlaybackInFlight = new Map<string, Promise<any>>();
 
-  async function extractFilemoonByseStream(sourceUrl: string): Promise<{
+  async function extractFilemoonByseStream(sourceUrl: string, forceRefresh: boolean = false): Promise<{
     ok: boolean;
     m3u8Url?: string;
     headers?: Record<string, string>;
@@ -1500,13 +1748,17 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
         : pathParts[pathParts.length - 1];
 
       if (code && code.length >= 6) {
-        const cachedPb = bysePlaybackCache.get(code);
-        if (cachedPb && cachedPb.expiresAt > Date.now()) {
-          return cachedPb.result;
-        }
-        const existingInFlight = bysePlaybackInFlight.get(sourceUrl.trim());
-        if (existingInFlight) {
-          return existingInFlight;
+        if (!forceRefresh) {
+          const cachedPb = bysePlaybackCache.get(code);
+          if (cachedPb && cachedPb.expiresAt > Date.now()) {
+            return cachedPb.result;
+          }
+          const existingInFlight = bysePlaybackInFlight.get(sourceUrl.trim());
+          if (existingInFlight) {
+            return existingInFlight;
+          }
+        } else {
+          bysePlaybackCache.delete(code);
         }
       }
 
@@ -1530,23 +1782,24 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           let videoTitle = "";
           let defaultLangCode = "";
 
-          // Fire embed/details & settings in background WHILE immediately starting captcha+attestation on primary origin!
+          // Fire embed/details & settings against fast origin in background WHILE solving captcha+playback!
+          const metaOrigin = byseEmbedOriginCache.get(origin) || "https://filemoon.sx";
           const metaPromise = Promise.all([
-            fetch(`${origin}/api/videos/${code}/embed/details`, {
+            fetch(`${metaOrigin}/api/videos/${code}/embed/details`, {
               headers: {
                 "User-Agent": ua,
                 "Accept": "application/json",
-                "Referer": `${origin}/e/${code}`
+                "Referer": `${metaOrigin}/e/${code}`
               },
-              signal: AbortSignal.timeout(4000)
+              signal: AbortSignal.timeout(3000)
             }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-            fetch(`${origin}/api/videos/${code}/settings`, {
+            fetch(`${metaOrigin}/api/videos/${code}/settings`, {
               headers: {
                 "User-Agent": ua,
                 "Accept": "application/json",
-                "Referer": `${origin}/e/${code}`
+                "Referer": `${metaOrigin}/e/${code}`
               },
-              signal: AbortSignal.timeout(3500)
+              signal: AbortSignal.timeout(2500)
             }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
           ]).then(([details, settings]) => {
             if (details) {
@@ -1563,99 +1816,122 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
             }
           });
 
-          const tryByseCandidateOrigin = async (candidateOrigin: string): Promise<any | null> => {
+          const tryByseCandidateOrigin = async (candidateOrigin: string): Promise<{ candidateOrigin: string; pbData: any } | null> => {
             const candidateFrameUrl = `${candidateOrigin}/e/${code}`;
-            const fingerprint = await getOrAttestByseFingerprint(candidateOrigin, candidateFrameUrl, ua);
-            if (!fingerprint) return null;
+            const candidateHost = (() => { try { return new URL(candidateOrigin).host; } catch { return parsed.host; } })();
 
-            const embedHeaders: Record<string, string> = {
-              "User-Agent": ua,
-              "Content-Type": "application/json",
-              "Origin": candidateOrigin,
-              "Referer": candidateFrameUrl,
-              "X-Embed-Origin": parsed.host,
-              "X-Embed-Referer": sourceUrl.trim(),
-              "X-Embed-Parent": `${origin}/e/${code}`
-            };
+            for (let attempt = 0; attempt < 2; attempt++) {
+              const forceFresh = attempt === 1;
+              const hadCached = !forceFresh && Boolean(byseAttestCache.get(candidateOrigin));
+              const fingerprint = await getOrAttestByseFingerprint(candidateOrigin, candidateFrameUrl, ua, forceFresh);
+              if (!fingerprint) return null;
 
-            let pbData: any = null;
-            const capChRes = await fetch(`${candidateOrigin}/api/videos/${code}/embed/captcha`, {
-              method: "POST",
-              headers: embedHeaders,
-              body: JSON.stringify({ fingerprint }),
-              signal: AbortSignal.timeout(4500)
-            }).catch(() => null);
+              const embedHeaders: Record<string, string> = {
+                "User-Agent": ua,
+                "Content-Type": "application/json",
+                "Origin": candidateOrigin,
+                "Referer": candidateFrameUrl,
+                "X-Embed-Origin": candidateHost,
+                "X-Embed-Referer": candidateFrameUrl,
+                "X-Embed-Parent": candidateFrameUrl
+              };
 
-            if (capChRes && capChRes.ok) {
-              const capCh = await capChRes.json();
-              const powNonce = capCh.pow_nonce || capCh.nonce;
-              const powDiff = capCh.pow_difficulty || capCh.difficulty || 16;
-              const powToken = capCh.pow_token || capCh.challenge_id;
-              const solutionStr = solveBysePow(powNonce, powDiff);
-
-              const capVerRes = await fetch(`${candidateOrigin}/api/videos/${code}/embed/captcha/verify`, {
+              let pbData: any = null;
+              const capChRes = await fetch(`${candidateOrigin}/api/videos/${code}/embed/captcha`, {
                 method: "POST",
                 headers: embedHeaders,
-                body: JSON.stringify({
-                  pow_token: powToken,
-                  solution: solutionStr,
-                  fingerprint
-                }),
-                signal: AbortSignal.timeout(4500)
+                body: JSON.stringify({ fingerprint }),
+                signal: AbortSignal.timeout(3500)
               }).catch(() => null);
 
-              if (capVerRes && capVerRes.ok) {
-                const capVer = await capVerRes.json();
-                const captchaToken = capVer.token || capVer.captcha_token || "";
+              if (capChRes && capChRes.ok) {
+                const capCh = await capChRes.json();
+                const powNonce = capCh.pow_nonce || capCh.nonce;
+                const powDiff = capCh.pow_difficulty || capCh.difficulty || 16;
+                const powToken = capCh.pow_token || capCh.challenge_id;
+                const solutionStr = await solveBysePowParallel(powNonce, powDiff);
+
+                const capVerRes = await fetch(`${candidateOrigin}/api/videos/${code}/embed/captcha/verify`, {
+                  method: "POST",
+                  headers: embedHeaders,
+                  body: JSON.stringify({
+                    pow_token: powToken,
+                    solution: solutionStr,
+                    fingerprint
+                  }),
+                  signal: AbortSignal.timeout(3500)
+                }).catch(() => null);
+
+                if (capVerRes && capVerRes.ok) {
+                  const capVer = await capVerRes.json();
+                  const captchaToken = capVer.token || capVer.captcha_token || "";
+                  const pbRes = await fetch(`${candidateOrigin}/api/videos/${code}/embed/playback`, {
+                    method: "POST",
+                    headers: {
+                      ...embedHeaders,
+                      "X-Captcha-Token": captchaToken
+                    },
+                    body: JSON.stringify({ fingerprint }),
+                    signal: AbortSignal.timeout(3500)
+                  }).catch(() => null);
+                  if (pbRes && pbRes.ok) {
+                    pbData = await pbRes.json().catch(() => ({}));
+                  }
+                }
+              } else if (capChRes && capChRes.status >= 400 && capChRes.status < 500 && capChRes.status !== 404) {
+                // Retry once with fresh attestation if cached fingerprint expired
+                byseAttestCache.delete(candidateOrigin);
+                if (hadCached) continue;
+              } else if (capChRes) {
                 const pbRes = await fetch(`${candidateOrigin}/api/videos/${code}/embed/playback`, {
                   method: "POST",
-                  headers: {
-                    ...embedHeaders,
-                    "X-Captcha-Token": captchaToken
-                  },
+                  headers: embedHeaders,
                   body: JSON.stringify({ fingerprint }),
-                  signal: AbortSignal.timeout(4500)
+                  signal: AbortSignal.timeout(3500)
                 }).catch(() => null);
                 if (pbRes && pbRes.ok) {
                   pbData = await pbRes.json().catch(() => ({}));
                 }
               }
-            } else {
-              const pbRes = await fetch(`${candidateOrigin}/api/videos/${code}/embed/playback`, {
-                method: "POST",
-                headers: embedHeaders,
-                body: JSON.stringify({ fingerprint }),
-                signal: AbortSignal.timeout(4500)
-              }).catch(() => null);
-              if (pbRes && pbRes.ok) {
-                pbData = await pbRes.json().catch(() => ({}));
+
+              if (pbData?.playback) {
+                return { candidateOrigin, pbData };
               }
+              byseAttestCache.delete(candidateOrigin);
+              if (!hadCached) break;
             }
-            return pbData;
+            return null;
           };
 
-          const immediateOrigins = Array.from(
-            new Set([origin, "https://byseraguci.com", "https://f16px.com"].filter(Boolean))
-          );
+          const cachedMappedOrigin = byseEmbedOriginCache.get(origin);
+          const attemptOrigins = buildByseCandidateOrigins(origin, cachedMappedOrigin);
 
-          const attemptOrigins = [...immediateOrigins];
-          let idxOrigin = 0;
-          let triedDiscovered = false;
-
-          while (idxOrigin < attemptOrigins.length) {
-            const candidateOrigin = attemptOrigins[idxOrigin++];
-            const pbData = await tryByseCandidateOrigin(candidateOrigin);
-            if (!pbData?.playback) {
-              if (idxOrigin === attemptOrigins.length && !triedDiscovered) {
-                triedDiscovered = true;
-                await Promise.race([metaPromise, new Promise((r) => setTimeout(r, 400))]);
-                if (discoveredEmbedOrigin && !attemptOrigins.includes(discoveredEmbedOrigin)) {
-                  attemptOrigins.push(discoveredEmbedOrigin);
-                }
-              }
-              continue;
+          let winningCandidate: { candidateOrigin: string; pbData: any } | null = null;
+          // Try primary fast origin first (usually filemoon.sx, ~300-800ms); if it fails, race remaining mirrors in parallel!
+          if (attemptOrigins.length > 0) {
+            winningCandidate = await tryByseCandidateOrigin(attemptOrigins[0]);
+          }
+          if (!winningCandidate && attemptOrigins.length > 1) {
+            const restOrigins = attemptOrigins.slice(1);
+            winningCandidate = await Promise.any(
+              restOrigins.map(async (orig) => {
+                const res = await tryByseCandidateOrigin(orig);
+                if (!res) throw new Error(`No playback on ${orig}`);
+                return res;
+              })
+            ).catch(() => null);
+          }
+          if (!winningCandidate) {
+            await Promise.race([metaPromise, new Promise((r) => setTimeout(r, 400))]);
+            if (discoveredEmbedOrigin && !attemptOrigins.includes(discoveredEmbedOrigin)) {
+              winningCandidate = await tryByseCandidateOrigin(discoveredEmbedOrigin);
             }
-            await Promise.race([metaPromise, new Promise((r) => setTimeout(r, 150))]);
+          }
+
+          if (winningCandidate?.pbData?.playback) {
+            const candidateOrigin = winningCandidate.candidateOrigin;
+            const pbData = winningCandidate.pbData;
+            await Promise.race([metaPromise, new Promise((r) => setTimeout(r, 120))]);
 
             if (pbData?.playback) {
               const pb = pbData.playback;
@@ -1839,14 +2115,46 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
   //    (Multi-hop JS redirect + ROT13 / Symbol-Strip / Base64 / Shift(-3) / Reverse / wc0)
   // ============================================================================
   const VOE_MIRROR_DOMAINS = [
-    "voe.sx", "voe.", "voe-network", "cloudwindow-route", "reputationsickler",
-    "turtledoveconsequent", "launchreliantcleaverriver", "fraudclatterflyingcar",
-    "321naturelikefur", "ralphysuccessfull", "yodelswart", "availedsmallest",
-    "graceaddresscommunity", "loriwithinfamily", "nathanfromsubject",
+    "voe.sx", "voe.", "voe-network", "cloudwindow-route", "arianathankspecial",
+    "susanexpectcare", "shannoncoldalready", "shanelocaldog", "ashleyhardat",
+    "jamespatterncamera", "derricknationtop", "claireguessthousand", "megankiddifference",
+    "reputationsickler", "turtledoveconsequent", "launchreliantcleaverriver",
+    "fraudclatterflyingcar", "321naturelikefur", "ralphysuccessfull", "yodelswart",
+    "availedsmallest", "graceaddresscommunity", "loriwithinfamily", "nathanfromsubject",
     "jilliandescribecompany", "maxfinishseveral", "kristiesoundsimply",
     "richardsignfish", "primaryclassalright", "alejandrorisk", "cindyeyefinal",
     "dianaavoidthey"
   ];
+
+  // Dynamic self-healing active VOE origin (bypasses voe.sx DDoS-Guard 403 & auto-updates on rotation!)
+  let activeVoeOrigin = "https://arianathankspecial.com";
+  let lastVoeRegistryRefreshAt = 0;
+  const voePlaybackInFlight = new Map<string, Promise<any>>();
+
+  async function refreshActiveVoeOriginFromRegistry(): Promise<string | null> {
+    const now = Date.now();
+    if (now - lastVoeRegistryRefreshAt < 60 * 60 * 1000) return null;
+    lastVoeRegistryRefreshAt = now;
+    try {
+      const resp = await fetch(
+        "https://raw.githubusercontent.com/Gujal00/ResolveURL/master/script.module.resolveurl/lib/resolveurl/plugins/voesx.py",
+        { signal: AbortSignal.timeout(4000) }
+      );
+      if (!resp.ok) return null;
+      const py = await resp.text();
+      const domBlock = py.match(/domains\s*=\s*\[([\s\S]*?)\]/);
+      if (!domBlock) return null;
+      const doms = (domBlock[1].match(/['"]([a-z0-9.-]+)['"]/g) || []).map((s) => s.slice(1, -1));
+      const newest = doms.slice(-3).reverse();
+      for (const d of newest) {
+        if (d && d !== "voe.sx") {
+          activeVoeOrigin = `https://${d}`;
+          return activeVoeOrigin;
+        }
+      }
+    } catch {}
+    return null;
+  }
 
   function isVoeOrMirrorUrl(rawUrl: string): boolean {
     if (!rawUrl || typeof rawUrl !== "string") return false;
@@ -1977,18 +2285,20 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     headers?: Record<string, string>;
     error?: string;
   }> {
-    const ua = defaultByseUa;
-    try {
-      let currentUrl = normalizeVoeEmbedUrl(sourceUrl);
-      let refererUrl = (() => {
-        try {
-          return `${new URL(currentUrl).origin}/`;
-        } catch {
-          return "https://voe.sx/";
-        }
-      })();
+    const trimmedKey = sourceUrl.trim();
+    const existing = voePlaybackInFlight.get(trimmedKey);
+    if (existing) return existing;
 
-      for (let hop = 0; hop < 2; hop++) {
+    const ua = defaultByseUa;
+    const runSingleCandidate = async (startUrl: string): Promise<{
+      ok: boolean;
+      m3u8Url?: string;
+      headers?: Record<string, string>;
+    } | null> => {
+      let currentUrl = normalizeVoeEmbedUrl(startUrl);
+      let refererUrl = "https://voe.sx/";
+
+      for (let hop = 0; hop < 6; hop++) {
         const resp = await fetch(currentUrl, {
           headers: {
             "User-Agent": ua,
@@ -1997,11 +2307,18 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
             "Referer": refererUrl
           },
           redirect: "follow",
-          signal: AbortSignal.timeout(2500)
-        });
+          signal: AbortSignal.timeout(4500)
+        }).catch(() => null);
+
+        if (!resp) break;
         const finalHopUrl = resp.url || currentUrl;
-        const html = await resp.text();
+        const html = await resp.text().catch(() => "");
         if (!html) break;
+
+        // Immediately skip DDoS-Guard 403 or Cloudflare 520 challenge pages
+        if ((resp.status === 403 || resp.status >= 500) && (html.includes("DDoS-Guard") || html.includes("520:"))) {
+          break;
+        }
 
         currentUrl = finalHopUrl;
 
@@ -2010,6 +2327,9 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           let pageOrigin = "https://voe.sx";
           try {
             pageOrigin = new URL(currentUrl).origin;
+            if (!pageOrigin.includes("voe.sx")) {
+              activeVoeOrigin = pageOrigin;
+            }
           } catch {}
           return {
             ok: true,
@@ -2045,11 +2365,37 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
 
         break;
       }
+      return null;
+    };
 
-      return { ok: false, error: "Could not extract VOE stream directly" };
-    } catch (err: any) {
-      return { ok: false, error: err?.message || "VOE direct extraction error" };
-    }
+    const taskPromise = (async () => {
+      try {
+        const candidates = buildVoeCandidateUrls(trimmedKey, activeVoeOrigin);
+        for (const candidateUrl of candidates) {
+          const hit = await runSingleCandidate(candidateUrl);
+          if (hit?.ok && hit.m3u8Url) return hit;
+        }
+
+        // Self-healing fallback: if VOE rotated domain again, discover latest active mirror once per hour
+        const voeCode = extractVoeVideoCode(trimmedKey);
+        if (voeCode) {
+          const freshOrigin = await refreshActiveVoeOriginFromRegistry();
+          if (freshOrigin) {
+            const hit = await runSingleCandidate(`${freshOrigin}/e/${voeCode}`);
+            if (hit?.ok && hit.m3u8Url) return hit;
+          }
+        }
+
+        return { ok: false, error: "Could not extract VOE stream directly" };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || "VOE direct extraction error" };
+      }
+    })().finally(() => {
+      voePlaybackInFlight.delete(trimmedKey);
+    });
+
+    voePlaybackInFlight.set(trimmedKey, taskPromise);
+    return taskPromise;
   }
 
   // ============================================================================
@@ -2217,7 +2563,9 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     return { quality, audioTracks };
   }
 
-  async function extractStreamtapeDirectStream(sourceUrl: string): Promise<{
+  const streamtapeInFlight = new Map<string, Promise<any>>();
+
+  async function extractStreamtapeDirectStream(sourceUrl: string, fastMode: boolean = false): Promise<{
     ok: boolean;
     directUrl?: string;
     cdnUrl?: string;
@@ -2230,7 +2578,12 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     headers?: Record<string, string>;
     error?: string;
   }> {
+    const inflightKey = `${sourceUrl.trim()}::${fastMode ? "fast" : "full"}`;
+    const existing = streamtapeInFlight.get(inflightKey);
+    if (existing) return existing;
+
     const ua = defaultByseUa;
+    const taskPromise = (async () => {
     try {
       const trimmed = sourceUrl.trim();
       const candidates = Array.from(
@@ -2252,7 +2605,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
               "Accept-Language": "en-US,en;q=0.9"
             },
-            signal: AbortSignal.timeout(10000)
+            signal: AbortSignal.timeout(7000)
           });
           if (!resp.ok) continue;
           const html = await resp.text();
@@ -2292,7 +2645,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
         return { ok: false, error: "Could not locate active Streamtape stream token (link may have been removed)" };
       }
 
-      // Follow 302 redirect & probe real size via HEAD / 1-byte Range GET
+      // Follow 302 redirect & probe real size (fastMode uses quick 302 Location lookup without body wait!)
       let cdnUrl = directUrl;
       let sizeBytes = 0;
       const lowerTrimmed = trimmed.toLowerCase().split("?")[0];
@@ -2305,34 +2658,57 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
         : "video/mp4";
 
       try {
-        const probeResp = await fetch(directUrl, {
-          method: "GET",
-          headers: {
-            "User-Agent": ua,
-            "Referer": "https://streamtape.com/",
-            "Origin": "https://streamtape.com",
-            "Range": "bytes=0-0",
-            "Accept": "*/*"
-          },
-          redirect: "follow",
-          signal: AbortSignal.timeout(9000)
-        });
-        try { await probeResp.body?.cancel(); } catch {}
-
-        if (probeResp.url && probeResp.url.startsWith("http")) {
-          cdnUrl = probeResp.url;
-        }
-        const contentRange = probeResp.headers.get("content-range") || "";
-        const totalMatch = contentRange.match(/\/(\d+)\s*$/);
-        if (totalMatch && totalMatch[1]) {
-          sizeBytes = parseInt(totalMatch[1], 10) || 0;
+        if (fastMode) {
+          // Ultra-fast 302 Location resolve (~200-350ms, zero tapecontent.net body round-trip!)
+          const redirResp = await fetch(directUrl, {
+            method: "GET",
+            headers: {
+              "User-Agent": ua,
+              "Referer": "https://streamtape.com/",
+              "Origin": "https://streamtape.com",
+              "Range": "bytes=0-0",
+              "Accept": "*/*"
+            },
+            redirect: "manual",
+            signal: AbortSignal.timeout(2200)
+          });
+          try { await redirResp.body?.cancel(); } catch {}
+          const loc = redirResp.headers.get("location");
+          if (loc && (loc.startsWith("http://") || loc.startsWith("https://"))) {
+            cdnUrl = loc;
+          } else if (loc && loc.startsWith("//")) {
+            cdnUrl = "https:" + loc;
+          }
         } else {
-          const cl = parseInt(probeResp.headers.get("content-length") || "0", 10);
-          if (!isNaN(cl) && cl > 1) sizeBytes = cl;
-        }
-        const upstreamCt = (probeResp.headers.get("content-type") || "").toLowerCase();
-        if (upstreamCt.startsWith("video/")) {
-          mimeType = upstreamCt.split(";")[0].trim();
+          const probeResp = await fetch(directUrl, {
+            method: "GET",
+            headers: {
+              "User-Agent": ua,
+              "Referer": "https://streamtape.com/",
+              "Origin": "https://streamtape.com",
+              "Range": "bytes=0-0",
+              "Accept": "*/*"
+            },
+            redirect: "follow",
+            signal: AbortSignal.timeout(8000)
+          });
+          try { await probeResp.body?.cancel(); } catch {}
+
+          if (probeResp.url && probeResp.url.startsWith("http")) {
+            cdnUrl = probeResp.url;
+          }
+          const contentRange = probeResp.headers.get("content-range") || "";
+          const totalMatch = contentRange.match(/\/(\d+)\s*$/);
+          if (totalMatch && totalMatch[1]) {
+            sizeBytes = parseInt(totalMatch[1], 10) || 0;
+          } else {
+            const cl = parseInt(probeResp.headers.get("content-length") || "0", 10);
+            if (!isNaN(cl) && cl > 1) sizeBytes = cl;
+          }
+          const upstreamCt = (probeResp.headers.get("content-type") || "").toLowerCase();
+          if (upstreamCt.startsWith("video/")) {
+            mimeType = upstreamCt.split(";")[0].trim();
+          }
         }
       } catch (probeErr) {
         console.warn("[StreamtapeExtractor] Direct size probe note:", probeErr);
@@ -2359,6 +2735,12 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
     } catch (err: any) {
       return { ok: false, error: err?.message || "Streamtape extraction error" };
     }
+    })().finally(() => {
+      streamtapeInFlight.delete(inflightKey);
+    });
+
+    streamtapeInFlight.set(inflightKey, taskPromise);
+    return taskPromise;
   }
 
   const handleExtractStream = async (req: any, res: any) => {
@@ -2382,6 +2764,14 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       if (!forceRefresh) {
         const cached = streamExtractionCache.get(cacheKey);
         if (cached && cached.expiresAt > now) {
+          if (!(cached as any).isDirectVideo && (cached as any).rawM3u8Url) {
+            const cachedHost = req.get("host") || "localhost:3000";
+            const cachedReqOrigin = String(req.headers.origin || "");
+            const cachedIsExt = Boolean(cachedReqOrigin && !cachedReqOrigin.includes(cachedHost) && cachedHost.includes("hf.space"));
+            const cachedServerOrigin = cachedIsExt ? `https://${cachedHost}` : "";
+            const cachedRef = (cached as any).headers?.["Referer"] || "";
+            void warmM3u8Chain((cached as any).rawM3u8Url, cachedRef, cachedServerOrigin);
+          }
           res.json({
             ok: true,
             m3u8Url: cached.m3u8Url,
@@ -2411,7 +2801,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       // DEDICATED STREAMTAPE / SERVER 3 FAST PATH (Runs BEFORE .mp4/.mkv & VOE)
       // ====================================================================
       if (isStreamtapeUrl(trimmedUrl) && !isStreamtapeDirectUrl(trimmedUrl)) {
-        const stResult = await extractStreamtapeDirectStream(trimmedUrl);
+        const stResult = await extractStreamtapeDirectStream(trimmedUrl, skipSubPlaylistProbe);
         if (stResult.ok && stResult.directUrl) {
           const ttlMs = 25 * 60 * 1000;
           const expiresAt = now + ttlMs;
@@ -2542,7 +2932,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       // DEDICATED FILEMOON / BYSE FAST PATH (byseraguci.com / filemoon.sx)
       // ====================================================================
       if (isFilemoonOrByseUrl(trimmedUrl)) {
-        const fmResult = await extractFilemoonByseStream(trimmedUrl);
+        const fmResult = await extractFilemoonByseStream(trimmedUrl, forceRefresh);
         if (fmResult.ok && fmResult.m3u8Url) {
           const ttlMs = 170 * 60 * 1000;
           const expiresAt = now + ttlMs;
@@ -2647,6 +3037,9 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
             duration: streamMeta.duration
           } as any);
 
+          // Non-blocking prefetch of master + first variant m3u8 so HLS.js hits warm cache immediately
+          void warmM3u8Chain(fmResult.m3u8Url, customRef, serverOrigin);
+
           res.json({
             ok: true,
             m3u8Url: proxiedMaster,
@@ -2677,14 +3070,32 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           const ttlMs = 170 * 60 * 1000;
           const expiresAt = now + ttlMs;
           const customRef = voeResult.headers?.["Referer"] || "https://voe.sx/";
-          const streamMeta = await parseHlsManifestMetadata(
-            voeResult.m3u8Url,
-            requestedDuration,
-            customRef,
-            skipSubPlaylistProbe,
-            forcedQuality || undefined,
-            trimmedUrl
-          );
+          // When fast === true (player playback), skip the blocking 1.1s upstream master.m3u8 round-trip;
+          // HLS.js fetches & parses master.m3u8 immediately and populates qualities/audio on MANIFEST_PARSED!
+          const streamMeta = skipSubPlaylistProbe
+            ? {
+                qualities: [forcedQuality || "1080p"],
+                qualityLinks: { [forcedQuality || "1080p"]: trimmedUrl } as Record<string, string>,
+                downloadQualities: [
+                  {
+                    id: forcedQuality || "1080p",
+                    label: `${forcedQuality || "1080p"} Full HD`,
+                    sizeMb: 0,
+                    url: trimmedUrl,
+                    bandwidth: 2200000
+                  }
+                ],
+                audioTracks: [] as string[],
+                duration: requestedDuration > 0 ? requestedDuration : 0
+              }
+            : await parseHlsManifestMetadata(
+                voeResult.m3u8Url,
+                requestedDuration,
+                customRef,
+                skipSubPlaylistProbe,
+                forcedQuality || undefined,
+                trimmedUrl
+              );
 
           const host = req.get("host") || "localhost:3000";
           const reqOrigin = String(req.headers.origin || "");
@@ -2722,6 +3133,9 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
             audioTracks: streamMeta.audioTracks,
             duration: streamMeta.duration
           } as any);
+
+          // Non-blocking prefetch of master + first variant m3u8 so HLS.js hits warm cache immediately
+          void warmM3u8Chain(voeResult.m3u8Url, customRef, serverOrigin);
 
           res.json({
             ok: true,
@@ -3116,36 +3530,44 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
   app.get(["/api/download-media", "/api/download-stream"], handleDownloadMedia);
   app.post(["/api/download-media", "/api/download-stream"], handleDownloadMedia);
 
-  // Dedicated Filemoon / Byse / HLS Playlist Proxy & Rewriter
-  const handleProxyM3u8 = async (req: any, res: any) => {
+  const rewrittenM3u8Cache = new Map<string, { body: string; childPlaylists: string[]; expiresAt: number }>();
+  const m3u8InFlight = new Map<string, Promise<{ ok: boolean; status: number; body: string; childPlaylists: string[] }>>();
+
+  const resolveM3u8Referer = (targetUrl: string, explicitReferer?: string): string => {
+    const clean = (explicitReferer || "").trim();
+    if (clean) return clean;
     try {
-      const targetUrl = (req.query.url as string || "").trim();
-      if (!targetUrl || (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://"))) {
-        res.status(400).send("#EXTM3U\n# Missing or invalid url");
-        return;
+      const u = new URL(targetUrl);
+      const h = u.hostname.toLowerCase();
+      if (h.includes("sprintcdn") || h.includes("owphbf") || h.includes("r66nv9ed") || h.includes("filemoon") || h.includes("byse") || h.includes("n1mwq")) {
+        return "https://filemoon.sx/";
+      } else if (h.includes("voe")) {
+        return "https://voe.sx/";
       }
+      return `${u.origin}/`;
+    } catch {
+      return "https://filemoon.sx/";
+    }
+  };
 
-      const host = req.get("host") || "localhost:3000";
-      const reqOrigin = String(req.headers.origin || "");
-      const isExternalCrossOrigin = Boolean(reqOrigin && !reqOrigin.includes(host) && host.includes("hf.space"));
-      const serverOrigin = isExternalCrossOrigin ? `https://${host}` : "";
+  const fetchAndRewriteM3u8 = async (
+    targetUrl: string,
+    explicitReferer: string,
+    serverOrigin: string
+  ): Promise<{ ok: boolean; status: number; body: string; childPlaylists: string[] }> => {
+    const referer = resolveM3u8Referer(targetUrl, explicitReferer);
+    const cacheKeyM3u8 = `${serverOrigin}|${referer}|${targetUrl}`;
+    const cachedRewritten = rewrittenM3u8Cache.get(cacheKeyM3u8);
+    if (cachedRewritten && cachedRewritten.expiresAt > Date.now()) {
+      return { ok: true, status: 200, body: cachedRewritten.body, childPlaylists: cachedRewritten.childPlaylists };
+    }
 
-      let referer = (req.query.referer as string || "").trim();
-      if (!referer) {
-        try {
-          const u = new URL(targetUrl);
-          const h = u.hostname.toLowerCase();
-          if (h.includes("sprintcdn") || h.includes("owphbf") || h.includes("r66nv9ed") || h.includes("filemoon") || h.includes("byse") || h.includes("n1mwq")) {
-            referer = "https://byseraguci.com/";
-          } else if (h.includes("voe")) {
-            referer = "https://voe.sx/";
-          } else {
-            referer = `${u.origin}/`;
-          }
-        } catch {
-          referer = "https://byseraguci.com/";
-        }
-      }
+    const existingFlight = m3u8InFlight.get(cacheKeyM3u8);
+    if (existingFlight) {
+      return existingFlight;
+    }
+
+    const job = (async () => {
       let originHeader = "";
       try {
         originHeader = new URL(referer).origin;
@@ -3161,8 +3583,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
       });
 
       if (!upstream.ok) {
-        res.status(upstream.status).send(`#EXTM3U\n# Upstream responded with ${upstream.status}`);
-        return;
+        return { ok: false, status: upstream.status, body: `#EXTM3U\n# Upstream responded with ${upstream.status}`, childPlaylists: [] };
       }
 
       const text = await upstream.text();
@@ -3192,6 +3613,7 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
 
       const lines = rawLines;
       const rewrittenLines: string[] = [];
+      const childPlaylists: string[] = [];
       const refParam = referer ? `&referer=${encodeURIComponent(referer)}` : "";
       let expectVariantStreamUrl = false;
 
@@ -3206,22 +3628,20 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           if (line.startsWith("#EXT-X-STREAM-INF")) {
             expectVariantStreamUrl = true;
           }
-          // Check for #EXT-X-MEDIA:TYPE=AUDIO/SUBTITLES/...URI="..."
           if (line.startsWith("#EXT-X-MEDIA") && line.includes('URI="')) {
             line = line.replace(/URI="([^"]+)"/, (_match, uri) => {
               const full = joinHlsUrl(uri, targetUrl);
+              if (line.includes("TYPE=AUDIO") && childPlaylists.length < 3 && !childPlaylists.includes(full)) {
+                childPlaylists.push(full);
+              }
               return `URI="${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(full)}${refParam}"`;
             });
-          }
-          // Check for #EXT-X-KEY:METHOD=...,URI="..." or #EXT-X-MAP:URI="..."
-          else if ((line.startsWith("#EXT-X-KEY") || line.startsWith("#EXT-X-MAP")) && line.includes('URI="')) {
+          } else if ((line.startsWith("#EXT-X-KEY") || line.startsWith("#EXT-X-MAP")) && line.includes('URI="')) {
             line = line.replace(/URI="([^"]+)"/, (_match, uri) => {
               const full = joinHlsUrl(uri, targetUrl);
               return `URI="${serverOrigin}/proxy/ts?url=${encodeURIComponent(full)}${refParam}"`;
             });
-          }
-          // Check for #EXT-X-I-FRAME-STREAM-INF:...URI="..."
-          else if (line.startsWith("#EXT-X-I-FRAME-STREAM-INF") && line.includes('URI="')) {
+          } else if (line.startsWith("#EXT-X-I-FRAME-STREAM-INF") && line.includes('URI="')) {
             line = line.replace(/URI="([^"]+)"/, (_match, uri) => {
               const full = joinHlsUrl(uri, targetUrl);
               return `URI="${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(full)}${refParam}"`;
@@ -3229,10 +3649,6 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
           }
           rewrittenLines.push(line);
         } else {
-          // Line is a URL (variant playlist or media segment)
-          // IMPORTANT: Never check lowerFull.includes("urlset") here because VOE & Filemoon .ts segments
-          // reside inside a "...,.urlset/seg-1-v1-a1.ts" parent folder! Only route to /proxy/m3u8 when
-          // following #EXT-X-STREAM-INF or when the pathname itself ends in .m3u8 or master.txt.
           const fullUrl = joinHlsUrl(line, targetUrl);
           const lowerFull = fullUrl.toLowerCase();
           const pathBeforeQuery = lowerFull.split("?")[0];
@@ -3242,6 +3658,9 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
             pathBeforeQuery.endsWith("master.txt")
           ) {
             expectVariantStreamUrl = false;
+            if (childPlaylists.length < 3 && !childPlaylists.includes(fullUrl)) {
+              childPlaylists.push(fullUrl);
+            }
             rewrittenLines.push(`${serverOrigin}/proxy/m3u8?url=${encodeURIComponent(fullUrl)}${refParam}`);
           } else {
             rewrittenLines.push(`${serverOrigin}/proxy/ts?url=${encodeURIComponent(fullUrl)}${refParam}`);
@@ -3249,12 +3668,80 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
         }
       }
 
+      const finalM3u8Body = rewrittenLines.join("\n");
+      if (finalM3u8Body.includes("#EXTM3U")) {
+        if (rewrittenM3u8Cache.size > 250) {
+          rewrittenM3u8Cache.clear();
+        }
+        rewrittenM3u8Cache.set(cacheKeyM3u8, {
+          body: finalM3u8Body,
+          childPlaylists,
+          expiresAt: Date.now() + 5 * 60 * 1000
+        });
+      }
+
+      return { ok: true, status: 200, body: finalM3u8Body, childPlaylists };
+    })();
+
+    m3u8InFlight.set(cacheKeyM3u8, job);
+    try {
+      return await job;
+    } finally {
+      m3u8InFlight.delete(cacheKeyM3u8);
+    }
+  };
+
+  const warmM3u8Chain = async (masterUrl: string, referer: string, serverOrigin: string): Promise<void> => {
+    try {
+      if (!masterUrl || !masterUrl.startsWith("http")) return;
+      const master = await fetchAndRewriteM3u8(masterUrl, referer, serverOrigin);
+      if (master.ok && master.childPlaylists.length > 0) {
+        // Pre-warm top variant (and default audio track if present) in parallel
+        await Promise.allSettled(
+          master.childPlaylists.slice(0, 2).map((childUrl) => fetchAndRewriteM3u8(childUrl, referer, serverOrigin))
+        );
+      }
+    } catch {
+      // Background pre-warm is strictly best-effort
+    }
+  };
+
+  // Dedicated Filemoon / Byse / HLS Playlist Proxy & Rewriter
+  const handleProxyM3u8 = async (req: any, res: any) => {
+    try {
+      const targetUrl = (req.query.url as string || "").trim();
+      if (!targetUrl || (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://"))) {
+        res.status(400).send("#EXTM3U\n# Missing or invalid url");
+        return;
+      }
+
+      const host = req.get("host") || "localhost:3000";
+      const reqOrigin = String(req.headers.origin || "");
+      const isExternalCrossOrigin = Boolean(reqOrigin && !reqOrigin.includes(host) && host.includes("hf.space"));
+      const serverOrigin = isExternalCrossOrigin ? `https://${host}` : "";
+      const explicitReferer = (req.query.referer as string || "").trim();
+
+      const result = await fetchAndRewriteM3u8(targetUrl, explicitReferer, serverOrigin);
+
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "*");
+      if (!result.ok) {
+        res.status(result.status).send(result.body);
+        return;
+      }
+
+      // If this was a master playlist, immediately kick off variant prefetch in background
+      if (result.childPlaylists.length > 0) {
+        const resolvedRef = resolveM3u8Referer(targetUrl, explicitReferer);
+        for (const childUrl of result.childPlaylists.slice(0, 2)) {
+          void fetchAndRewriteM3u8(childUrl, resolvedRef, serverOrigin).catch(() => {});
+        }
+      }
+
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8");
       res.setHeader("Cache-Control", "public, max-age=3600");
-      res.status(200).send(rewrittenLines.join("\n"));
+      res.status(200).send(result.body);
     } catch (err: any) {
       if (!res.headersSent) {
         res.status(500).send(`#EXTM3U\n# Proxy error: ${err.message}`);
@@ -3557,10 +4044,11 @@ Always respond strictly with a valid JSON object matching this schema (do NOT wr
         originHeader = new URL(referer).origin;
       } catch {}
 
+      const isTapecontent = isStreamtapeUrl(targetUrl) || targetUrl.toLowerCase().includes("tapecontent.");
       const headers: Record<string, string> = {
         "User-Agent": defaultByseUa,
         "Referer": referer,
-        ...(originHeader ? { "Origin": originHeader } : {}),
+        ...(!isTapecontent && originHeader ? { "Origin": originHeader } : {}),
         "Accept": "*/*"
       };
 
